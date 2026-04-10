@@ -1,0 +1,38 @@
+trainer: property
+
+dataset:
+  src: data/property/train/data.lmdb
+  target_mean: [0.0]
+  target_std: [1.0]
+
+logger: tensorboard
+
+task:
+  dataset: property_lmdb
+  description: "Generic materials property prediction."
+  primary_metric: target1_mae
+  primary_metric_mode: min
+  export_predictions: True
+  export_splits:
+    - train
+    - val
+    - test
+  tasks:
+    target1:
+      type: regression
+      weight: 1.0
+
+optim:
+  batch_size: 32
+  eval_batch_size: 64
+  num_workers: 0
+  optimizer: AdamW
+  lr_initial: 0.001
+  weight_decay: 0.0
+  scheduler: ReduceLROnPlateau
+  mode: min
+  factor: 0.8
+  patience: 5
+  max_epochs: 50
+  eval_every: 100
+  early_stopping_patience: 20
