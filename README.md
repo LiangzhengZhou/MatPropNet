@@ -35,7 +35,7 @@ scripts/preprocess_property.py
 
 ## Installation
 
-Create an environment and install the package in editable mode:
+Create an environment and install MatPropNet as a package:
 
 ```bash
 conda env create -f env.cpu.yml
@@ -56,6 +56,20 @@ mp-10018,33.426734597608046,0.0216390625,"# generated using pymatgen
 ```
 
 The `cif` column can contain inline multi-line CIF text directly in the CSV.
+
+## CLI Usage
+
+After installation, you can run MatPropNet from any directory:
+
+```bash
+matpropnet-preprocess --csv /path/to/all.csv --out-root /path/to/output
+matpropnet-train --config /path/to/config.yml
+matpropnet-eval --config /path/to/config.yml --checkpoint /path/to/model.pt
+matpropnet-predict --config /path/to/config.yml --checkpoint /path/to/model.pt --input /path/to/test.csv --output /path/to/preds.csv
+```
+
+The legacy wrappers `python main.py --mode ...` and `python scripts/preprocess_property.py ...`
+are still kept for compatibility.
 
 ## CSV -> LMDB
 
@@ -96,6 +110,12 @@ Example GemNet multi-target training:
 python main.py --mode train --config-yml configs/property/gemnet_multitask.yml
 ```
 
+Or with the package CLI:
+
+```bash
+matpropnet-train --config /absolute/path/to/config.yml
+```
+
 The property stack supports:
 
 - latent output via `return_latent=True`
@@ -130,6 +150,9 @@ GemNet can now be used in two modes:
 
 ## Documentation
 
+- [Getting Started](docs/getting_started.md)
+- [Architecture Overview](docs/architecture_overview.md)
+- [Config Guide](docs/config_guide.md)
 - [Refactor Guide](docs/general_materials_framework_refactor.md)
 - [Property Quickstart](docs/property_quickstart.md)
 

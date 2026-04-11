@@ -163,6 +163,10 @@ class TrajectoryLmdbDataset(LmdbDataset):
 
 def data_list_collater(data_list, otf_graph=False):
     batch = Batch.from_data_list(data_list)
+    if hasattr(data_list[0], "sample_id"):
+        batch.sample_id = [str(data.sample_id) for data in data_list]
+    if hasattr(data_list[0], "target_names"):
+        batch.target_names = data_list[0].target_names
 
     if not otf_graph:
         try:

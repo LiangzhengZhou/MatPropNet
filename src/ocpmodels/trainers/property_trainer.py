@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import json
 import logging
 import os
 from collections import OrderedDict
@@ -155,35 +156,35 @@ class PropertyTrainer(BaseTrainer):
                 self.train_dataset, self.train_sampler
             )
 
-            if self.config.get("val_dataset", None):
-                self.val_dataset = registry.get_dataset_class(dataset_name)(
-                    self.config["val_dataset"]
-                )
-                self.val_sampler = self.get_sampler(
-                    self.val_dataset,
-                    self.config["optim"].get(
-                        "eval_batch_size", self.config["optim"]["batch_size"]
-                    ),
-                    shuffle=False,
-                )
-                self.val_loader = self.get_dataloader(
-                    self.val_dataset, self.val_sampler
-                )
+        if self.config.get("val_dataset", None):
+            self.val_dataset = registry.get_dataset_class(dataset_name)(
+                self.config["val_dataset"]
+            )
+            self.val_sampler = self.get_sampler(
+                self.val_dataset,
+                self.config["optim"].get(
+                    "eval_batch_size", self.config["optim"]["batch_size"]
+                ),
+                shuffle=False,
+            )
+            self.val_loader = self.get_dataloader(
+                self.val_dataset, self.val_sampler
+            )
 
-            if self.config.get("test_dataset", None):
-                self.test_dataset = registry.get_dataset_class(dataset_name)(
-                    self.config["test_dataset"]
-                )
-                self.test_sampler = self.get_sampler(
-                    self.test_dataset,
-                    self.config["optim"].get(
-                        "eval_batch_size", self.config["optim"]["batch_size"]
-                    ),
-                    shuffle=False,
-                )
-                self.test_loader = self.get_dataloader(
-                    self.test_dataset, self.test_sampler
-                )
+        if self.config.get("test_dataset", None):
+            self.test_dataset = registry.get_dataset_class(dataset_name)(
+                self.config["test_dataset"]
+            )
+            self.test_sampler = self.get_sampler(
+                self.test_dataset,
+                self.config["optim"].get(
+                    "eval_batch_size", self.config["optim"]["batch_size"]
+                ),
+                shuffle=False,
+            )
+            self.test_loader = self.get_dataloader(
+                self.test_dataset, self.test_sampler
+            )
 
         self.normalizers = {}
         mean = self.config["task"].get("target_mean")
@@ -362,6 +363,15 @@ class PropertyTrainer(BaseTrainer):
     def _forward(self, batch_list):
         return self.model(batch_list)
 
+    def _forward_with_optional_latent(self, batch_list, return_latent=False):
+        if not return_latent:
+            return self._forward(batch_list)
+        model = self.model
+        while hasattr(model, "module"):
+            model = model.module
+        batch = self._split_batch(batch_list).to(self.device)
+        return model(batch, return_latent=True)
+
     def _compute_loss(self, out, batch_list):
         batch = self._split_batch(batch_list).to(self.device)
         preds = out["task_preds"]
@@ -393,6 +403,15 @@ class PropertyTrainer(BaseTrainer):
         return total_loss
 
     def _update_metric(self, metrics, name, total, numel):
+        if isinstance(total, dict):
+            if name not in metrics:
+                metrics[name] = {"metric": 0.0}
+            for key, value in total.items():
+                if key == "metric":
+                    continue
+                metrics[name][key] = metrics[name].get(key, 0.0) + float(value)
+            metrics[name]["metric"] = float(total.get("metric", 0.0))
+            return metrics
         if name not in metrics:
             metrics[name] = {"total": 0.0, "numel": 0.0, "metric": 0.0}
         metrics[name]["total"] += float(total)
@@ -433,6 +452,9 @@ class PropertyTrainer(BaseTrainer):
                 denorm_pred = self._denormalize_prediction(task_name, pred)
                 mae_total = torch.abs(denorm_pred - target).sum().item()
                 mse_total = torch.square(denorm_pred - target).sum().item()
+                ss_res_total = torch.square(denorm_pred - target).sum().item()
+                sum_y = target.sum().item()
+                sum_y2 = torch.square(target).sum().item()
                 count = valid_mask.sum().item()
                 metrics = self._update_metric(
                     metrics, f"{task_name}_mae", mae_total, count
@@ -448,6 +470,18 @@ class PropertyTrainer(BaseTrainer):
                         / max(metrics[f"{task_name}_mse"]["numel"], 1.0)
                     ),
                 }
+                metrics = self._update_metric(
+                    metrics,
+                    f"{task_name}_r2",
+                    {
+                        "ss_res": ss_res_total,
+                        "sum_y": sum_y,
+                        "sum_y2": sum_y2,
+                        "count": count,
+                        "metric": 0.0,
+                    },
+                    count,
+                )
 
         for task_name, loss_value in out.get("per_task_loss", {}).items():
             metrics = self._update_metric(
@@ -458,6 +492,32 @@ class PropertyTrainer(BaseTrainer):
     def _aggregate_metrics(self, metrics):
         aggregated = {}
         for key, value in metrics.items():
+            if key.endswith("_r2"):
+                ss_res = distutils.all_reduce(
+                    value["ss_res"], average=False, device=self.device
+                )
+                sum_y = distutils.all_reduce(
+                    value["sum_y"], average=False, device=self.device
+                )
+                sum_y2 = distutils.all_reduce(
+                    value["sum_y2"], average=False, device=self.device
+                )
+                count = distutils.all_reduce(
+                    value["count"], average=False, device=self.device
+                )
+                ss_tot = max(sum_y2 - (sum_y * sum_y) / max(count, 1.0), 0.0)
+                if count <= 1 or ss_tot <= 1e-12:
+                    metric = 0.0
+                else:
+                    metric = 1.0 - (ss_res / ss_tot)
+                aggregated[key] = {
+                    "ss_res": ss_res,
+                    "sum_y": sum_y,
+                    "sum_y2": sum_y2,
+                    "count": count,
+                    "metric": metric,
+                }
+                continue
             total = distutils.all_reduce(
                 value["total"], average=False, device=self.device
             )
@@ -649,10 +709,22 @@ class PropertyTrainer(BaseTrainer):
             self.ema.store()
             self.ema.copy_to()
 
+        predict_cfg = self.config.get("task", {}).get("predict", {})
+        include_z = predict_cfg.get("export_latent", False)
+        include_graph_emb = predict_cfg.get("export_graph_emb", False)
+        include_node_emb = predict_cfg.get("export_node_emb", False)
+        return_latent = include_z or include_graph_emb or include_node_emb
+
         predictions = {"id": []}
         for task_name in self.task_names:
             predictions[f"pred_{task_name}"] = []
             predictions[f"target_{task_name}"] = []
+        if include_z:
+            predictions["z"] = []
+        if include_graph_emb:
+            predictions["graph_emb"] = []
+        if include_node_emb:
+            predictions["node_emb"] = []
 
         rank = distutils.get_rank()
         for _, batch_list in tqdm(
@@ -664,7 +736,9 @@ class PropertyTrainer(BaseTrainer):
         ):
             batch = batch_list[0]
             with torch.cuda.amp.autocast(enabled=self.scaler is not None):
-                out = self._forward(batch_list)
+                out = self._forward_with_optional_latent(
+                    batch_list, return_latent=return_latent
+                )
             preds = out["task_preds"]
             targets = batch.y.view(-1, self.num_targets)
             ids = self._extract_sample_ids(batch)
@@ -681,6 +755,22 @@ class PropertyTrainer(BaseTrainer):
                 predictions[f"target_{task_name}"].extend(
                     targets[:, idx].detach().cpu().tolist()
                 )
+            if include_z:
+                predictions["z"].extend(
+                    json.dumps(item)
+                    for item in out["z"].detach().cpu().tolist()
+                )
+            if include_graph_emb:
+                predictions["graph_emb"].extend(
+                    json.dumps(item)
+                    for item in out["graph_emb"].detach().cpu().tolist()
+                )
+            if include_node_emb:
+                node_emb = out["node_emb"].detach().cpu()
+                batch_index = batch.batch.detach().cpu()
+                for graph_idx in range(len(ids)):
+                    graph_nodes = node_emb[batch_index == graph_idx].tolist()
+                    predictions["node_emb"].append(json.dumps(graph_nodes))
 
         if self.ema:
             self.ema.restore()

@@ -13,6 +13,9 @@ Thumbs.db
 .venv/
 venv/
 env/
+.local/
+.hf_cache/
+*.egg-info/
 
 logs/
 results/

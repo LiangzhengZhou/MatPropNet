@@ -22,7 +22,7 @@ file paths if you switch the preprocessing mode.
 Create train/val/test LMDBs from a single CSV:
 
 ```bash
-python scripts/preprocess_property.py \
+matpropnet-preprocess \
   --csv data/property/all.csv \
   --out-root data/property \
   --target-columns target1,target2 \
@@ -81,7 +81,7 @@ This writes fold directories under `data/property_kfold/folds/fold_*/`.
 Use the provided example config:
 
 ```bash
-python main.py --mode train --config-yml configs/property/cgcnn_multitask.yml
+matpropnet-train --config configs/property/cgcnn_multitask.yml
 ```
 
 That config uses:
@@ -94,7 +94,7 @@ That config uses:
 To train with GemNet as the decoupled backbone:
 
 ```bash
-python main.py --mode train --config-yml configs/property/gemnet_multitask.yml
+matpropnet-train --config configs/property/gemnet_multitask.yml
 ```
 
 This path uses the new `GemNetT.forward_features()` backbone interface instead of the old
@@ -104,8 +104,8 @@ This path uses the new `GemNetT.forward_features()` backbone interface instead o
 ## 4. Predict with a checkpoint
 
 ```bash
-python main.py --mode predict \
-  --config-yml configs/property/cgcnn_multitask.yml \
+matpropnet-predict \
+  --config configs/property/cgcnn_multitask.yml \
   --checkpoint checkpoints/<run-id>/best_checkpoint.pt
 ```
 

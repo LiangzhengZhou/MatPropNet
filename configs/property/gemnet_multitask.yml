@@ -1,12 +1,12 @@
 includes:
-  - configs/property/base.yml
+  - base.yml
 
 dataset:
-  - src: data/property/train/data.lmdb
+  - src: ../../data/property/train/data.lmdb
     target_mean: [0.0, 0.0]
     target_std: [1.0, 1.0]
-  - src: data/property/val/data.lmdb
-  - src: data/property/test/data.lmdb
+  - src: ../../data/property/val/data.lmdb
+  - src: ../../data/property/test/data.lmdb
 
 model:
   name: property_model
