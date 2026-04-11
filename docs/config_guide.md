@@ -172,3 +172,27 @@ matpropnet-train \
 ```
 
 This is useful for quick experiments without copying config files.
+
+## 11. Loss Weighting
+
+MatPropNet now supports a unified multi-task loss weighting section:
+
+```yaml
+loss_weighting:
+  mode: static
+```
+
+Supported modes:
+
+- `static`
+- `gradnorm`
+- `uncertainty`
+
+If you omit `loss_weighting`, MatPropNet automatically falls back to:
+
+```yaml
+loss_weighting:
+  mode: static
+```
+
+See [`loss_weighting.md`](./loss_weighting.md) for mode-specific guidance, paper mapping, and logging fields.

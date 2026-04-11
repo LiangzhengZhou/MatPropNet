@@ -1,0 +1,9 @@
+includes:
+  - gemnet_multitask.yml
+
+loss_weighting:
+  mode: uncertainty
+  init_log_var: 0.0
+  clamp_min: -10.0
+  clamp_max: 10.0
+  learn_rate: 1.0e-3

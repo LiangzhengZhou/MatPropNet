@@ -26,6 +26,7 @@ from ocpmodels.common.registry import registry
 from ocpmodels.modules.exponential_moving_average import (
     ExponentialMovingAverage,
 )
+from ocpmodels.modules.loss_weighting import build_loss_weighting_strategy
 from ocpmodels.modules.normalizer import Normalizer
 from ocpmodels.modules.scheduler import LRScheduler
 from ocpmodels.trainers.base_trainer import BaseTrainer
@@ -106,6 +107,9 @@ class PropertyTrainer(BaseTrainer):
         self.primary_metric_mode = self.config["task"].get(
             "primary_metric_mode", "min"
         )
+        self.loss_weighting = build_loss_weighting_strategy(
+            self.config, self.task_specs
+        ).to(self.device)
 
     def get_sampler(self, dataset, batch_size, shuffle):
         if self.config["optim"].get("disable_load_balancing", False):
@@ -315,15 +319,20 @@ class PropertyTrainer(BaseTrainer):
                         "weight_decay": weight_decay,
                     }
                 )
+            param_groups.extend(self.loss_weighting.extra_optimizer_param_groups())
             self.optimizer = optimizer_cls(param_groups, **optimizer_params)
             return
 
-        self.optimizer = optimizer_cls(
-            params=[p for p in self.model.parameters() if p.requires_grad],
-            lr=self.config["optim"]["lr_initial"],
-            weight_decay=weight_decay,
-            **optimizer_params,
-        )
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        param_groups = [
+            {
+                "params": params,
+                "lr": self.config["optim"]["lr_initial"],
+                "weight_decay": weight_decay,
+            }
+        ]
+        param_groups.extend(self.loss_weighting.extra_optimizer_param_groups())
+        self.optimizer = optimizer_cls(param_groups, **optimizer_params)
 
     def load_extras(self):
         self.scheduler = LRScheduler(self.optimizer, self.config["optim"])
@@ -366,13 +375,71 @@ class PropertyTrainer(BaseTrainer):
     def _forward_with_optional_latent(self, batch_list, return_latent=False):
         if not return_latent:
             return self._forward(batch_list)
-        model = self.model
-        while hasattr(model, "module"):
-            model = model.module
+        model = self._unwrap_model()
         batch = self._split_batch(batch_list).to(self.device)
         return model(batch, return_latent=True)
 
-    def _compute_loss(self, out, batch_list):
+    def _unwrap_model(self):
+        model = self.model
+        while hasattr(model, "module"):
+            model = model.module
+        return model
+
+    def _get_loss_weighting_shared_params(self):
+        scope = (
+            self.config.get("loss_weighting", {}).get(
+                "shared_parameter_scope", "backbone_last_block"
+            )
+            if self.loss_weighting is not None
+            else "backbone_last_block"
+        )
+        model = self._unwrap_model()
+        backbone = getattr(model, "backbone", None)
+        latent = getattr(model, "latent", None)
+        latent_projector = getattr(model, "latent_projector", None)
+
+        if scope == "backbone":
+            params = [
+                param
+                for param in getattr(backbone, "parameters", lambda: [])()
+                if param.requires_grad
+            ]
+            if params:
+                return params
+        if scope == "latent_projector":
+            params = [
+                param
+                for param in getattr(latent_projector, "parameters", lambda: [])()
+                if param.requires_grad
+            ]
+            if params:
+                return params
+        if scope == "backbone_last_block" and backbone is not None:
+            blocks = getattr(backbone, "blocks", None)
+            if blocks is not None and len(blocks) > 0:
+                params = [param for param in blocks[-1].parameters() if param.requires_grad]
+                if params:
+                    return params
+        for module in (latent_projector, latent, backbone):
+            if module is None:
+                continue
+            params = [param for param in module.parameters() if param.requires_grad]
+            if params:
+                return params
+        return [param for param in model.parameters() if param.requires_grad]
+
+    def _build_loss_weighting_context(self, is_training: bool):
+        return {
+            "global_step": self.step,
+            "epoch": self.epoch,
+            "is_training": is_training,
+            "amp_enabled": self.scaler is not None,
+            "shared_params": self._get_loss_weighting_shared_params()
+            if is_training
+            else [],
+        }
+
+    def _compute_task_losses(self, out, batch_list):
         batch = self._split_batch(batch_list).to(self.device)
         preds = out["task_preds"]
         targets = batch.y.to(self.device).view(-1, self.num_targets)
@@ -382,8 +449,7 @@ class PropertyTrainer(BaseTrainer):
         )
         target_mask = target_mask.view(-1, self.num_targets).bool()
 
-        total_loss = torch.tensor(0.0, device=self.device)
-        per_task_loss = {}
+        task_losses = {}
         for task_name, spec in self.task_specs.items():
             idx = self.task_name_to_idx[task_name]
             valid_mask = target_mask[:, idx]
@@ -396,10 +462,20 @@ class PropertyTrainer(BaseTrainer):
                     target = target.float()
                 else:
                     target = target.long()
-            loss_value = self.loss_fns[task_name](pred, target)
-            total_loss = total_loss + spec.get("weight", 1.0) * loss_value
-            per_task_loss[task_name] = loss_value.detach()
-        out["per_task_loss"] = per_task_loss
+            task_losses[task_name] = self.loss_fns[task_name](pred, target)
+        return task_losses
+
+    def _compute_loss(self, out, batch_list, is_training=True):
+        task_losses = self._compute_task_losses(out, batch_list)
+        total_loss, loss_weighting_stats = self.loss_weighting.compute_weighted_loss(
+            task_losses,
+            self._build_loss_weighting_context(is_training=is_training),
+        )
+        out["per_task_loss"] = {
+            task_name: loss_value.detach()
+            for task_name, loss_value in task_losses.items()
+        }
+        out["loss_weighting_stats"] = loss_weighting_stats
         return total_loss
 
     def _update_metric(self, metrics, name, total, numel):
@@ -487,6 +563,9 @@ class PropertyTrainer(BaseTrainer):
             metrics = self._update_metric(
                 metrics, f"{task_name}_loss", float(loss_value.item()), 1
             )
+        for key, value in out.get("loss_weighting_stats", {}).items():
+            if isinstance(value, (int, float)):
+                metrics = self._update_metric(metrics, key, float(value), 1)
         return metrics
 
     def _aggregate_metrics(self, metrics):
@@ -556,14 +635,18 @@ class PropertyTrainer(BaseTrainer):
                 self.step = epoch_int * len(self.train_loader) + i + 1
                 self.model.train()
                 batch = next(train_loader_iter)
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
+                retain_graph = self.loss_weighting.requires_post_backward
 
                 with torch.cuda.amp.autocast(enabled=self.scaler is not None):
                     out = self._forward(batch)
-                    loss = self._compute_loss(out, batch)
+                    loss = self._compute_loss(out, batch, is_training=True)
 
                 if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
+                    self.scaler.scale(loss).backward(retain_graph=retain_graph)
+                    loss_weighting_log = self.loss_weighting.on_after_backward(
+                        self._build_loss_weighting_context(is_training=True)
+                    )
                     if self.clip_grad_norm:
                         self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
@@ -572,12 +655,20 @@ class PropertyTrainer(BaseTrainer):
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    loss.backward()
+                    loss.backward(retain_graph=retain_graph)
+                    loss_weighting_log = self.loss_weighting.on_after_backward(
+                        self._build_loss_weighting_context(is_training=True)
+                    )
                     if self.clip_grad_norm:
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(), self.clip_grad_norm
                         )
                     self.optimizer.step()
+                loss_weighting_log.update(
+                    self.loss_weighting.on_after_optimizer_step(
+                        self._build_loss_weighting_context(is_training=True)
+                    )
+                )
                 if self.ema:
                     self.ema.update()
 
@@ -586,6 +677,12 @@ class PropertyTrainer(BaseTrainer):
                     metrics, "loss", loss.detach().item(), 1
                 )
                 log_dict = {k: v["metric"] for k, v in metrics.items()}
+                for key, value in out.get("loss_weighting_stats", {}).items():
+                    if isinstance(value, (int, float)):
+                        log_dict[key] = float(value)
+                for key, value in loss_weighting_log.items():
+                    if isinstance(value, (int, float)):
+                        log_dict[key] = float(value)
                 log_dict["epoch"] = self.epoch
                 log_dict["lr"] = self.scheduler.get_lr()
                 if self.logger is not None:
@@ -652,7 +749,7 @@ class PropertyTrainer(BaseTrainer):
         ):
             with torch.cuda.amp.autocast(enabled=self.scaler is not None):
                 out = self._forward(batch)
-                loss = self._compute_loss(out, batch)
+                loss = self._compute_loss(out, batch, is_training=False)
             metrics = self._compute_metrics(out, batch, metrics=metrics)
             metrics = self._update_metric(
                 metrics, "loss", loss.detach().item(), 1

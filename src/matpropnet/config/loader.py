@@ -158,6 +158,11 @@ def validate_config(config: dict):
     missing = [key for key in required if key not in config]
     if missing:
         raise ValueError(f"Missing required config sections: {missing}")
+    config.setdefault("loss_weighting", {"mode": "static"})
+    loss_weighting = config["loss_weighting"]
+    if not isinstance(loss_weighting, dict):
+        raise TypeError("'loss_weighting' must be a mapping when provided.")
+    loss_weighting.setdefault("mode", "static")
     return config
 
 

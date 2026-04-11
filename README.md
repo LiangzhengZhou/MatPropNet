@@ -20,6 +20,7 @@ refocuses the project on reusable crystal and materials property learning.
 - backbone freezing and staged finetuning
 - CSV -> LMDB preprocessing for CIF-based crystal datasets
 - GemNet, CGCNN, and SchNet style backbones under one training interface
+- unified multi-task loss weighting with static, GradNorm, and uncertainty modes
 
 ## Project Layout
 

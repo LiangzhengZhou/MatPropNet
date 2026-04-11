@@ -1,0 +1,5 @@
+includes:
+  - gemnet_multitask.yml
+
+loss_weighting:
+  mode: static

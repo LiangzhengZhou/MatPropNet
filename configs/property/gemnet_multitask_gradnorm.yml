@@ -1,0 +1,13 @@
+includes:
+  - gemnet_multitask.yml
+
+loss_weighting:
+  mode: gradnorm
+  alpha: 1.5
+  epsilon: 1.0e-8
+  clamp_min: 1.0e-3
+  clamp_max: 1.0e3
+  lr: 1.0e-3
+  update_every: 1
+  warmup_steps: 0
+  shared_parameter_scope: backbone_last_block

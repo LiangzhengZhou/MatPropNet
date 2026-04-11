@@ -456,6 +456,13 @@ class BaseTrainer(ABC):
             self.optimizer.load_state_dict(checkpoint["optimizer"])
         if "scheduler" in checkpoint and checkpoint["scheduler"] is not None:
             self.scheduler.scheduler.load_state_dict(checkpoint["scheduler"])
+        if (
+            "loss_weighting" in checkpoint
+            and checkpoint["loss_weighting"] is not None
+            and hasattr(self, "loss_weighting")
+            and self.loss_weighting is not None
+        ):
+            self.loss_weighting.load_state_dict(checkpoint["loss_weighting"])
         if "ema" in checkpoint and checkpoint["ema"] is not None:
             self.ema.load_state_dict(checkpoint["ema"])
         else:
@@ -558,6 +565,10 @@ class BaseTrainer(ABC):
                             key: value.state_dict()
                             for key, value in self.normalizers.items()
                         },
+                        "loss_weighting": self.loss_weighting.state_dict()
+                        if hasattr(self, "loss_weighting")
+                        and self.loss_weighting is not None
+                        else None,
                         "config": self.config,
                         "val_metrics": metrics,
                         "ema": self.ema.state_dict() if self.ema else None,
@@ -579,6 +590,10 @@ class BaseTrainer(ABC):
                             key: value.state_dict()
                             for key, value in self.normalizers.items()
                         },
+                        "loss_weighting": self.loss_weighting.state_dict()
+                        if hasattr(self, "loss_weighting")
+                        and self.loss_weighting is not None
+                        else None,
                         "config": self.config,
                         "val_metrics": metrics,
                         "amp": self.scaler.state_dict()
