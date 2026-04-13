@@ -103,6 +103,18 @@ This path uses the new `GemNetT.forward_features()` backbone interface instead o
 Additional backbone examples:
 
 ```bash
+matpropnet-train --config configs/property/cgcnn_single_task.yml
+matpropnet-train --config configs/property/schnet_single_task.yml
+matpropnet-train --config configs/property/gemnet_single_task.yml
+matpropnet-train --config configs/property/dimenet_single_task.yml
+matpropnet-train --config configs/property/dimenetplusplus_single_task.yml
+matpropnet-train --config configs/property/forcenet_single_task.yml
+matpropnet-train --config configs/property/spinconv_single_task.yml
+```
+
+Multi-task backbone examples:
+
+```bash
 matpropnet-train --config configs/property/dimenet_multitask.yml
 matpropnet-train --config configs/property/dimenetplusplus_multitask.yml
 matpropnet-train --config configs/property/forcenet_multitask.yml

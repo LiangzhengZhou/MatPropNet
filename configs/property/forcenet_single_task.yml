@@ -1,0 +1,58 @@
+includes:
+  - base.yml
+
+dataset:
+  - src: ../../data/property/train/data.lmdb
+    target_mean: [0.0]
+    target_std: [1.0]
+  - src: ../../data/property/val/data.lmdb
+  - src: ../../data/property/test/data.lmdb
+
+model:
+  name: property_model
+  backbone:
+    name: forcenet
+    hidden_channels: 128
+    num_interactions: 3
+    cutoff: 6.0
+    feat: full
+    num_freqs: 32
+    max_n: 3
+    basis: sphallmul
+    depth_mlp_edge: 2
+    depth_mlp_node: 1
+    activation_str: swish
+    ablation: none
+    decoder_hidden_channels: 128
+    decoder_type: mlp
+    decoder_activation_str: swish
+    otf_graph: false
+  pooling:
+    name: mean
+  latent:
+    hidden_dim: 128
+    out_dim: 64
+    num_layers: 2
+
+task:
+  primary_metric: target1_mae
+  tasks:
+    target1:
+      type: regression
+      loss: mae
+      weight: 1.0
+
+optim:
+  batch_size: 8
+  eval_batch_size: 16
+  num_workers: 0
+  lr_initial: 0.0003
+  max_epochs: 100
+  eval_every: 200
+  param_groups:
+    - name: backbone
+      lr: 0.0001
+    - name: latent
+      lr: 0.0003
+    - name: heads
+      lr: 0.001
