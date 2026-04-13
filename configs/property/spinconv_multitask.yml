@@ -1,0 +1,70 @@
+includes:
+  - base.yml
+
+dataset:
+  - src: ../../data/property/train/data.lmdb
+    target_mean: [0.0, 0.0]
+    target_std: [1.0, 1.0]
+  - src: ../../data/property/val/data.lmdb
+  - src: ../../data/property/test/data.lmdb
+
+model:
+  name: property_model
+  backbone:
+    name: spinconv
+    hidden_channels: 32
+    mid_hidden_channels: 128
+    num_interactions: 1
+    num_basis_functions: 64
+    basis_width_scalar: 1.0
+    max_num_neighbors: 20
+    sphere_size_lat: 15
+    sphere_size_long: 9
+    cutoff: 6.0
+    distance_block_scalar_max: 2.0
+    max_num_elements: 90
+    embedding_size: 32
+    show_timing_info: false
+    sphere_message: fullconv
+    output_message: fullconv
+    lmax: false
+    force_estimator: random
+    model_ref_number: 0
+    readout: add
+    num_rand_rotations: 3
+    scale_distances: true
+    otf_graph: false
+    use_pbc: true
+  pooling:
+    name: mean
+  latent:
+    hidden_dim: 128
+    out_dim: 64
+    num_layers: 2
+
+task:
+  primary_metric: target1_mae
+  tasks:
+    target1:
+      type: regression
+      loss: mae
+      weight: 1.0
+    target2:
+      type: regression
+      loss: mae
+      weight: 1.0
+
+optim:
+  batch_size: 4
+  eval_batch_size: 8
+  num_workers: 0
+  lr_initial: 0.0003
+  max_epochs: 100
+  eval_every: 200
+  param_groups:
+    - name: backbone
+      lr: 0.0001
+    - name: latent
+      lr: 0.0003
+    - name: heads
+      lr: 0.001

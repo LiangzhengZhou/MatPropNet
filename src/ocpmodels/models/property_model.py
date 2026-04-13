@@ -20,7 +20,11 @@ from ocpmodels.common.registry import registry
 from ocpmodels.common.utils import get_pbc_distances, radius_graph_pbc
 from ocpmodels.datasets.embeddings import KHOT_EMBEDDINGS, QMOF_KHOT_EMBEDDINGS
 from ocpmodels.models.base import BaseModel
+from ocpmodels.models.dimenet import DimeNetWrap
+from ocpmodels.models.dimenet_plus_plus import DimeNetPlusPlusWrap
+from ocpmodels.models.forcenet import ForceNet
 from ocpmodels.models.gemnet.gemnet import GemNetT
+from ocpmodels.models.spinconv import spinconv
 
 
 def _build_mlp(
@@ -293,6 +297,162 @@ class GemNetBackbone(nn.Module):
         return self.model.forward_features(data)
 
 
+class DimeNetBackbone(nn.Module):
+    def __init__(self, bond_feat_dim: int, hidden_dim: int = 128, **backbone_config):
+        del bond_feat_dim
+        config = dict(backbone_config)
+        config.pop("name", None)
+        config.setdefault("regress_forces", False)
+        self.hidden_dim = hidden_dim
+        super().__init__()
+        self.model = DimeNetWrap(
+            num_atoms=None,
+            bond_feat_dim=0,
+            num_targets=hidden_dim,
+            hidden_channels=config.get("hidden_channels", hidden_dim),
+            num_blocks=config.get("num_blocks", 6),
+            num_bilinear=config.get("num_bilinear", 8),
+            num_spherical=config.get("num_spherical", 7),
+            num_radial=config.get("num_radial", 6),
+            otf_graph=config.get("otf_graph", False),
+            cutoff=config.get("cutoff", 10.0),
+            envelope_exponent=config.get("envelope_exponent", 5),
+            num_before_skip=config.get("num_before_skip", 1),
+            num_after_skip=config.get("num_after_skip", 2),
+            num_output_layers=config.get("num_output_layers", 3),
+            max_angles_per_image=config.get("max_angles_per_image", int(1e6)),
+            use_pbc=config.get("use_pbc", True),
+            regress_forces=False,
+        )
+
+    @property
+    def blocks(self):
+        return self.model.blocks
+
+    def forward(self, data):
+        return self.model.forward_features(data)
+
+
+class DimeNetPlusPlusBackbone(nn.Module):
+    def __init__(self, bond_feat_dim: int, hidden_dim: int = 128, **backbone_config):
+        del bond_feat_dim
+        config = dict(backbone_config)
+        config.pop("name", None)
+        config.setdefault("regress_forces", False)
+        self.hidden_dim = hidden_dim
+        super().__init__()
+        self.model = DimeNetPlusPlusWrap(
+            num_atoms=None,
+            bond_feat_dim=0,
+            num_targets=hidden_dim,
+            hidden_channels=config.get("hidden_channels", hidden_dim),
+            num_blocks=config.get("num_blocks", 4),
+            int_emb_size=config.get("int_emb_size", 64),
+            basis_emb_size=config.get("basis_emb_size", 8),
+            out_emb_channels=config.get("out_emb_channels", 256),
+            num_spherical=config.get("num_spherical", 7),
+            num_radial=config.get("num_radial", 6),
+            otf_graph=config.get("otf_graph", False),
+            cutoff=config.get("cutoff", 10.0),
+            envelope_exponent=config.get("envelope_exponent", 5),
+            num_before_skip=config.get("num_before_skip", 1),
+            num_after_skip=config.get("num_after_skip", 2),
+            num_output_layers=config.get("num_output_layers", 3),
+            use_pbc=config.get("use_pbc", True),
+            regress_forces=False,
+        )
+
+    @property
+    def blocks(self):
+        return self.model.blocks
+
+    def forward(self, data):
+        return self.model.forward_features(data)
+
+
+class ForceNetBackbone(nn.Module):
+    def __init__(self, bond_feat_dim: int, **backbone_config):
+        del bond_feat_dim
+        config = dict(backbone_config)
+        config.pop("name", None)
+        super().__init__()
+        self.model = ForceNet(
+            num_atoms=None,
+            bond_feat_dim=0,
+            num_targets=1,
+            hidden_channels=config.get("hidden_channels", 512),
+            num_interactions=config.get("num_interactions", 5),
+            cutoff=config.get("cutoff", 6.0),
+            feat=config.get("feat", "full"),
+            num_freqs=config.get("num_freqs", 50),
+            max_n=config.get("max_n", 3),
+            basis=config.get("basis", "sphallmul"),
+            depth_mlp_edge=config.get("depth_mlp_edge", 2),
+            depth_mlp_node=config.get("depth_mlp_node", 1),
+            activation_str=config.get("activation_str", "swish"),
+            ablation=config.get("ablation", "none"),
+            decoder_hidden_channels=config.get("decoder_hidden_channels", 512),
+            decoder_type=config.get("decoder_type", "mlp"),
+            decoder_activation_str=config.get("decoder_activation_str", "swish"),
+            training=True,
+            otf_graph=config.get("otf_graph", False),
+        )
+        self.hidden_dim = getattr(self.model, "output_dim", config.get("decoder_hidden_channels", 512))
+
+    @property
+    def blocks(self):
+        return self.model.blocks
+
+    def forward(self, data):
+        return self.model.forward_features(data)
+
+
+class SpinConvBackbone(nn.Module):
+    def __init__(self, bond_feat_dim: int, **backbone_config):
+        del bond_feat_dim
+        config = dict(backbone_config)
+        config.pop("name", None)
+        hidden_dim = config.get("hidden_channels", 32)
+        self.hidden_dim = hidden_dim
+        super().__init__()
+        self.model = spinconv(
+            num_atoms=None,
+            bond_feat_dim=0,
+            num_targets=1,
+            use_pbc=config.get("use_pbc", True),
+            regress_forces=False,
+            otf_graph=config.get("otf_graph", False),
+            hidden_channels=hidden_dim,
+            mid_hidden_channels=config.get("mid_hidden_channels", 200),
+            num_interactions=config.get("num_interactions", 1),
+            num_basis_functions=config.get("num_basis_functions", 200),
+            basis_width_scalar=config.get("basis_width_scalar", 1.0),
+            max_num_neighbors=config.get("max_num_neighbors", 20),
+            sphere_size_lat=config.get("sphere_size_lat", 15),
+            sphere_size_long=config.get("sphere_size_long", 9),
+            cutoff=config.get("cutoff", 10.0),
+            distance_block_scalar_max=config.get("distance_block_scalar_max", 2.0),
+            max_num_elements=config.get("max_num_elements", 90),
+            embedding_size=config.get("embedding_size", 32),
+            show_timing_info=config.get("show_timing_info", False),
+            sphere_message=config.get("sphere_message", "fullconv"),
+            output_message=config.get("output_message", "fullconv"),
+            lmax=config.get("lmax", False),
+            force_estimator=config.get("force_estimator", "random"),
+            model_ref_number=config.get("model_ref_number", 0),
+            readout=config.get("readout", "add"),
+            num_rand_rotations=config.get("num_rand_rotations", 5),
+            scale_distances=config.get("scale_distances", True),
+        )
+
+    @property
+    def blocks(self):
+        return self.model.blocks
+
+    def forward(self, data):
+        return self.model.forward_features(data)
+
+
 def build_backbone(backbone_config: Dict, bond_feat_dim: int) -> nn.Module:
     name = (backbone_config.get("name") or "cgcnn").lower()
     if name == "cgcnn":
@@ -318,6 +478,16 @@ def build_backbone(backbone_config: Dict, bond_feat_dim: int) -> nn.Module:
         )
     if name in {"gemnet", "gemnet_t"}:
         return GemNetBackbone(bond_feat_dim=bond_feat_dim, **backbone_config)
+    if name == "dimenet":
+        return DimeNetBackbone(bond_feat_dim=bond_feat_dim, **backbone_config)
+    if name in {"dimenetplusplus", "dimenet_plus_plus", "dimenet++"}:
+        return DimeNetPlusPlusBackbone(
+            bond_feat_dim=bond_feat_dim, **backbone_config
+        )
+    if name == "forcenet":
+        return ForceNetBackbone(bond_feat_dim=bond_feat_dim, **backbone_config)
+    if name == "spinconv":
+        return SpinConvBackbone(bond_feat_dim=bond_feat_dim, **backbone_config)
     raise ValueError(f"Unsupported property backbone '{name}'")
 
 

@@ -74,6 +74,13 @@ model:
     name: gemnet_t
 ```
 
+Additional supported backbone names:
+
+- `spinconv`
+- `dimenet`
+- `dimenetplusplus` or `dimenet_plus_plus`
+- `forcenet`
+
 ## 5. Defining Tasks
 
 Single target:

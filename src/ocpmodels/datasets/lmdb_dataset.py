@@ -45,7 +45,23 @@ class LmdbDataset(Dataset):
         self.config = config
 
         self.path = Path(self.config["src"])
-        if not self.path.is_file():
+        self._single_lmdb_dir = self.path.is_dir() and (
+            (self.path / "data.mdb").exists() or (self.path / "lock.mdb").exists()
+        )
+        if self._single_lmdb_dir:
+            self.metadata_path = self.path.parent / "metadata.npz"
+            self.env = self.connect_db(self.path)
+            length_bytes = self.env.begin().get("length".encode("ascii"))
+            if length_bytes is not None:
+                length = pickle.loads(length_bytes)
+                self._keys = [f"{j}".encode("ascii") for j in range(length)]
+            else:
+                self._keys = [
+                    f"{j}".encode("ascii")
+                    for j in range(self.env.stat()["entries"])
+                ]
+            self.num_samples = len(self._keys)
+        elif not self.path.is_file():
             db_paths = sorted(self.path.glob("*.lmdb"))
             assert len(db_paths) > 0, f"No LMDBs found in '{self.path}'"
 
@@ -84,7 +100,15 @@ class LmdbDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        if not self.path.is_file():
+        if self._single_lmdb_dir:
+            datapoint_pickled = self.env.begin().get(self._keys[idx])
+            if datapoint_pickled is None:
+                raise ValueError(
+                    "LMDB entry is missing; dataset may be corrupted. "
+                    f"path={self.path}, idx={idx}"
+                )
+            data_object = pyg2_data_transform(pickle.loads(datapoint_pickled))
+        elif not self.path.is_file():
             # Figure out which db this should be indexed from.
             db_idx = bisect.bisect(self._keylen_cumulative, idx)
             # Extract index of element within that db.
@@ -124,7 +148,7 @@ class LmdbDataset(Dataset):
     def connect_db(self, lmdb_path=None):
         env = lmdb.open(
             str(lmdb_path),
-            subdir=False,
+            subdir=Path(lmdb_path).is_dir(),
             readonly=True,
             lock=False,
             readahead=False,
@@ -134,7 +158,9 @@ class LmdbDataset(Dataset):
         return env
 
     def close_db(self):
-        if not self.path.is_file():
+        if self._single_lmdb_dir:
+            self.env.close()
+        elif not self.path.is_file():
             for env in self.envs:
                 env.close()
         else:

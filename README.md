@@ -19,7 +19,7 @@ refocuses the project on reusable crystal and materials property learning.
 - latent representation extraction
 - backbone freezing and staged finetuning
 - CSV -> LMDB preprocessing for CIF-based crystal datasets
-- GemNet, CGCNN, and SchNet style backbones under one training interface
+- GemNet, SpinConv, DimeNet++, ForceNet, DimeNet, SchNet, and CGCNN backbones under one training interface
 - unified multi-task loss weighting with static, GradNorm, and uncertainty modes
 
 ## Project Layout

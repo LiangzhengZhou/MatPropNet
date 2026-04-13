@@ -100,6 +100,15 @@ matpropnet-train --config configs/property/gemnet_multitask.yml
 This path uses the new `GemNetT.forward_features()` backbone interface instead of the old
 `out_blocks`-driven task output path.
 
+Additional backbone examples:
+
+```bash
+matpropnet-train --config configs/property/dimenet_multitask.yml
+matpropnet-train --config configs/property/dimenetplusplus_multitask.yml
+matpropnet-train --config configs/property/forcenet_multitask.yml
+matpropnet-train --config configs/property/spinconv_multitask.yml
+```
+
 
 ## 4. Predict with a checkpoint
 

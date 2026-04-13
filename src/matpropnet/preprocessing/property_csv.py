@@ -223,13 +223,26 @@ def write_lmdb_split(rows, out_dir, task_schema, args):
         r_fixed=True,
     )
     db_path = os.path.join(out_dir, "data.lmdb")
-    db = lmdb.open(
-        db_path,
-        map_size=args.map_size_gb * 1024**3,
-        subdir=False,
-        meminit=False,
-        map_async=True,
-    )
+    open_kwargs = {
+        "map_size": args.map_size_gb * 1024**3,
+        "subdir": False,
+        "meminit": False,
+        "map_async": True,
+    }
+    try:
+        db = lmdb.open(db_path, **open_kwargs)
+    except lmdb.Error:
+        # Some Windows environments reject file-mode LMDBs for temporary paths.
+        # Fall back to directory-mode so the produced dataset remains readable
+        # via the dataset loader on both Windows and Linux.
+        for maybe_partial in (db_path, f"{db_path}-lock"):
+            if os.path.exists(maybe_partial):
+                os.remove(maybe_partial)
+        os.makedirs(db_path, exist_ok=True)
+        open_kwargs["subdir"] = True
+        open_kwargs["map_async"] = False
+        open_kwargs["meminit"] = True
+        db = lmdb.open(db_path, **open_kwargs)
 
     targets_list, masks_list = [], []
     natoms_list, neighbors_list = [], []
