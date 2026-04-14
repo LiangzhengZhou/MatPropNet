@@ -68,6 +68,7 @@ def _build_trainer(config: dict):
         amp=config.get("amp", False),
         cpu=config.get("cpu", False),
         slurm=config.get("slurm", {}),
+        extra_config=config,
     )
 
 

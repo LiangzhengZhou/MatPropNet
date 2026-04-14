@@ -4,6 +4,7 @@ Copyright (c) Facebook, Inc. and its affiliates.
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 """
+import copy
 import datetime
 import errno
 import json
@@ -95,6 +96,7 @@ class BaseTrainer(ABC):
         name="base_trainer",
         slurm={},
         loss=None,
+        extra_config=None,
     ):
         self.name = name
         self.cpu = cpu
@@ -130,33 +132,38 @@ class BaseTrainer(ABC):
         commit_hash = _safe_git_describe()
 
         logger_name = logger if isinstance(logger, str) else logger["name"]
-        self.config = {
-            "task": task,
-            "model": model.pop("name"),
-            "model_attributes": model,
-            "optim": optimizer,
-            "loss": loss or {},
-            "logger": logger,
-            "amp": amp,
-            "gpus": distutils.get_world_size() if not self.cpu else 0,
-            "cmd": {
-                "identifier": identifier,
-                "print_every": print_every,
-                "seed": seed,
-                "timestamp_id": self.timestamp_id,
-                "commit": commit_hash,
-                "checkpoint_dir": os.path.join(
-                    run_dir, "checkpoints", self.timestamp_id
-                ),
-                "results_dir": os.path.join(
-                    run_dir, "results", self.timestamp_id
-                ),
-                "logs_dir": os.path.join(
-                    run_dir, "logs", logger_name, self.timestamp_id
-                ),
-            },
-            "slurm": slurm,
-        }
+        model_cfg = copy.deepcopy(model)
+        model_name = model_cfg.pop("name")
+        self.config = copy.deepcopy(extra_config) if extra_config else {}
+        self.config.update(
+            {
+                "task": task,
+                "model": model_name,
+                "model_attributes": model_cfg,
+                "optim": optimizer,
+                "loss": loss or {},
+                "logger": logger,
+                "amp": amp,
+                "gpus": distutils.get_world_size() if not self.cpu else 0,
+                "slurm": slurm,
+                "cmd": {
+                    "identifier": identifier,
+                    "print_every": print_every,
+                    "seed": seed,
+                    "timestamp_id": self.timestamp_id,
+                    "commit": commit_hash,
+                    "checkpoint_dir": os.path.join(
+                        run_dir, "checkpoints", self.timestamp_id
+                    ),
+                    "results_dir": os.path.join(
+                        run_dir, "results", self.timestamp_id
+                    ),
+                    "logs_dir": os.path.join(
+                        run_dir, "logs", logger_name, self.timestamp_id
+                    ),
+                },
+            }
+        )
         # AMP Scaler
         self.scaler = torch.cuda.amp.GradScaler() if amp else None
 

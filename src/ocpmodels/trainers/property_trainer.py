@@ -55,6 +55,7 @@ class PropertyTrainer(BaseTrainer):
         cpu=False,
         slurm={},
         loss=None,
+        extra_config=None,
     ):
         super().__init__(
             task=task,
@@ -77,6 +78,7 @@ class PropertyTrainer(BaseTrainer):
             name="property",
             slurm=slurm,
             loss=loss,
+            extra_config=extra_config,
         )
 
     def load_task(self):
