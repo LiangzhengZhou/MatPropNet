@@ -17,4 +17,20 @@ setup(
             "matpropnet-predict=matpropnet.cli.predict:main",
         ]
     },
+    install_requires=[
+        "ase>=3.22",
+        "lmdb>=1.4",
+        "numpy>=1.23",
+        "pyyaml>=6.0",
+        "scipy>=1.10",
+        "sympy>=1.11",
+        "torch>=2.0",
+        "torch-geometric>=2.3",
+        "tqdm>=4.64",
+    ],
+    extras_require={
+        "dev": ["pytest>=7.0"],
+        "logging": ["tensorboard>=2.12", "wandb>=0.16"],
+        "materials": ["pymatgen>=2023.5"],
+    },
 )

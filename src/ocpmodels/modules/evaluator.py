@@ -65,20 +65,29 @@ class Evaluator:
     }
 
     def __init__(self, task=None):
-        assert task in ["s2ef", "is2rs", "is2re", "property"]
+        if task not in ["s2ef", "is2rs", "is2re", "property"]:
+            raise ValueError(f"Unsupported evaluation task '{task}'.")
         self.task = task
         self.metric_fn = self.task_metrics[task]
 
-    def eval(self, prediction, target, prev_metrics={}):
+    def eval(self, prediction, target, prev_metrics=None):
+        prev_metrics = {} if prev_metrics is None else prev_metrics
         for attr in self.task_attributes[self.task]:
-            assert attr in prediction
-            assert attr in target
-            assert prediction[attr].shape == target[attr].shape
+            if attr not in prediction:
+                raise KeyError(f"Missing prediction attribute '{attr}'.")
+            if attr not in target:
+                raise KeyError(f"Missing target attribute '{attr}'.")
+            if prediction[attr].shape != target[attr].shape:
+                raise ValueError(
+                    f"Mismatched shapes for '{attr}': "
+                    f"{prediction[attr].shape} vs {target[attr].shape}"
+                )
 
         metrics = prev_metrics
 
         for fn in self.task_metrics[self.task]:
-            res = eval(fn)(prediction, target)
+            metric_fn = METRIC_FNS[fn]
+            res = metric_fn(prediction, target)
             metrics = self.update(fn, res, metrics)
 
         return metrics
@@ -169,8 +178,10 @@ def positions_mse(prediction, target):
 
 def energy_force_within_threshold(prediction, target):
     # Note that this natoms should be the count of free atoms we evaluate over.
-    assert target["natoms"].sum() == prediction["forces"].size(0)
-    assert target["natoms"].size(0) == prediction["energy"].size(0)
+    if target["natoms"].sum() != prediction["forces"].size(0):
+        raise ValueError("natoms does not match flattened forces length.")
+    if target["natoms"].size(0) != prediction["energy"].size(0):
+        raise ValueError("natoms does not match energy batch length.")
 
     # compute absolute error on per-atom forces and energy per system.
     # then count the no. of systems where max force error is < 0.03 and max
@@ -290,7 +301,8 @@ def squared_error(prediction, target):
 
 
 def magnitude_error(prediction, target, p=2):
-    assert prediction.shape[1] > 1
+    if prediction.shape[1] <= 1:
+        raise ValueError("Magnitude error expects vectors with more than one component.")
     error = torch.abs(
         torch.norm(prediction, p=p, dim=-1) - torch.norm(target, p=p, dim=-1)
     )
@@ -299,3 +311,24 @@ def magnitude_error(prediction, target, p=2):
         "total": torch.sum(error).item(),
         "numel": error.numel(),
     }
+
+
+METRIC_FNS = {
+    "energy_mae": energy_mae,
+    "energy_mse": energy_mse,
+    "forcesx_mae": forcesx_mae,
+    "forcesx_mse": forcesx_mse,
+    "forcesy_mae": forcesy_mae,
+    "forcesy_mse": forcesy_mse,
+    "forcesz_mae": forcesz_mae,
+    "forcesz_mse": forcesz_mse,
+    "forces_mae": forces_mae,
+    "forces_mse": forces_mse,
+    "forces_cos": forces_cos,
+    "forces_magnitude": forces_magnitude,
+    "positions_mae": positions_mae,
+    "positions_mse": positions_mse,
+    "energy_force_within_threshold": energy_force_within_threshold,
+    "energy_within_threshold": energy_within_threshold,
+    "average_distance_within_threshold": average_distance_within_threshold,
+}

@@ -1,7 +1,11 @@
 from collections import OrderedDict
+from pathlib import Path
+import tempfile
 
 import torch
 
+from matpropnet.tasks.core import _write_prediction_csv
+from ocpmodels.modules.evaluator import Evaluator
 from ocpmodels.trainers.property_trainer import PropertyTrainer
 
 
@@ -52,3 +56,33 @@ def test_property_metrics_r2_handles_nonperfect_predictions():
     metrics = trainer._compute_metrics(out, [batch], metrics={})
     aggregated = trainer._aggregate_metrics(metrics)
     assert aggregated["target1_r2"]["metric"] < 1.0
+
+
+def test_evaluator_eval_uses_fresh_default_metrics():
+    evaluator = Evaluator(task="is2re")
+    prediction = {"energy": torch.tensor([1.0])}
+    target = {"energy": torch.tensor([2.0])}
+
+    first = evaluator.eval(prediction, target)
+    second = evaluator.eval(prediction, target)
+
+    assert first["energy_mae"]["numel"] == 1
+    assert second["energy_mae"]["numel"] == 1
+
+
+def test_predict_csv_uses_threshold_for_single_logit_binary_classification():
+    predictions = {
+        "id": ["sample-1", "sample-2"],
+        "pred_label": [1, 0],
+        "target_label": [1.0, 0.0],
+        "prob_label": [0.8, 0.2],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        csv_path = Path(tmp_dir) / "predictions.csv"
+        _write_prediction_csv(predictions, str(csv_path))
+        contents = csv_path.read_text(encoding="utf-8")
+
+    assert "pred_label" in contents
+    assert "prob_label" in contents
+    assert "0.8" in contents

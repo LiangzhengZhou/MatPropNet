@@ -53,7 +53,7 @@ class PropertyTrainer(BaseTrainer):
         local_rank=0,
         amp=False,
         cpu=False,
-        slurm={},
+        slurm=None,
         loss=None,
         extra_config=None,
     ):
@@ -818,6 +818,8 @@ class PropertyTrainer(BaseTrainer):
         for task_name in self.task_names:
             predictions[f"pred_{task_name}"] = []
             predictions[f"target_{task_name}"] = []
+            if self.task_specs[task_name].get("type", "regression") == "classification":
+                predictions[f"prob_{task_name}"] = []
         if include_z:
             predictions["z"] = []
         if include_graph_emb:
@@ -849,7 +851,15 @@ class PropertyTrainer(BaseTrainer):
                 if self.task_specs[task_name].get("type", "regression") == "regression":
                     pred = self._denormalize_prediction(task_name, pred).cpu()
                 elif pred.ndim > 1 and pred.shape[-1] > 1:
+                    prob = torch.softmax(pred, dim=-1)
+                    predictions[f"prob_{task_name}"].extend(
+                        prob.tolist()
+                    )
                     pred = pred.argmax(dim=-1)
+                else:
+                    prob = torch.sigmoid(pred.view(-1))
+                    predictions[f"prob_{task_name}"].extend(prob.tolist())
+                    pred = (prob >= 0.5).long()
                 predictions[f"pred_{task_name}"].extend(pred.tolist())
                 predictions[f"target_{task_name}"].extend(
                     targets[:, idx].detach().cpu().tolist()

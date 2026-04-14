@@ -81,6 +81,15 @@ def build_task_schema(args, fieldnames):
     task_types = parse_csv_list(args.task_types) or ["regression"] * len(target_columns)
     if len(task_types) != len(target_columns):
         raise SystemExit("--task-types must align with --target-columns.")
+    valid_task_types = {"regression", "classification"}
+    invalid_task_types = [
+        task_type for task_type in task_types if task_type not in valid_task_types
+    ]
+    if invalid_task_types:
+        raise SystemExit(
+            f"Unsupported task type(s): {', '.join(invalid_task_types)}. "
+            "Expected regression or classification."
+        )
     num_classes = parse_csv_list(args.num_classes, int) if args.num_classes else []
     if num_classes and len(num_classes) != len(target_columns):
         raise SystemExit("--num-classes must align with --target-columns.")
@@ -127,10 +136,16 @@ def split_by_column(rows, split_column):
 
 
 def random_split(rows, fractions, seed):
+    if len(fractions) != 3:
+        raise ValueError("random_split expects exactly three fractions for train/val/test.")
     rng = np.random.default_rng(seed)
     indices = np.arange(len(rows))
     rng.shuffle(indices)
     frac = np.asarray(fractions, dtype=np.float64)
+    if np.any(frac < 0):
+        raise ValueError("Split fractions must be non-negative.")
+    if frac.sum() <= 0:
+        raise ValueError("Split fractions must sum to a positive value.")
     frac = frac / frac.sum()
     n_total = len(rows)
     n_train = int(frac[0] * n_total)
@@ -194,7 +209,8 @@ def build_data_object(a2g, row, row_idx, task_schema, args):
     data_object.sid = row_idx
     data_object.sample_id = str(row.get(args.id_column, row_idx))
     data_object.target_names = [task["name"] for task in task_schema]
-    neighbors = int(data_object.edge_index.shape[1]) if hasattr(data_object, "edge_index") else 0
+    edge_index = getattr(data_object, "edge_index", None)
+    neighbors = int(edge_index.shape[1]) if edge_index is not None else 0
     return data_object, targets, mask, int(data_object.natoms), neighbors
 
 
@@ -211,6 +227,56 @@ def write_schema(out_dir, task_schema, stats):
         json.dump({"tasks": task_schema, "stats": stats}, handle, indent=2)
 
 
+def _cleanup_lmdb_path(db_path):
+    for maybe_partial in (db_path, f"{db_path}-lock"):
+        if os.path.isdir(maybe_partial):
+            for entry in os.listdir(maybe_partial):
+                os.remove(os.path.join(maybe_partial, entry))
+            os.rmdir(maybe_partial)
+        elif os.path.exists(maybe_partial):
+            os.remove(maybe_partial)
+
+
+def _open_lmdb_for_writing(db_path, map_size):
+    candidate_map_sizes = [map_size]
+    reduced_sizes = [512 * 1024**2, 128 * 1024**2]
+    for reduced_size in reduced_sizes:
+        if reduced_size < map_size:
+            candidate_map_sizes.append(reduced_size)
+
+    attempts = []
+    for candidate_size in candidate_map_sizes:
+        attempts.append(
+            {
+                "map_size": candidate_size,
+                "subdir": False,
+                "meminit": False,
+                "map_async": True,
+            }
+        )
+    for candidate_size in candidate_map_sizes:
+        attempts.append(
+            {
+                "map_size": candidate_size,
+                "subdir": True,
+                "meminit": True,
+                "map_async": False,
+            }
+        )
+
+    last_error = None
+    for open_kwargs in attempts:
+        _cleanup_lmdb_path(db_path)
+        if open_kwargs["subdir"]:
+            os.makedirs(db_path, exist_ok=True)
+        try:
+            return lmdb.open(db_path, **open_kwargs)
+        except lmdb.Error as exc:
+            last_error = exc
+            continue
+    raise last_error
+
+
 def write_lmdb_split(rows, out_dir, task_schema, args):
     os.makedirs(out_dir, exist_ok=True)
     a2g = AtomsToGraphs(
@@ -223,35 +289,32 @@ def write_lmdb_split(rows, out_dir, task_schema, args):
         r_fixed=True,
     )
     db_path = os.path.join(out_dir, "data.lmdb")
-    open_kwargs = {
-        "map_size": args.map_size_gb * 1024**3,
-        "subdir": False,
-        "meminit": False,
-        "map_async": True,
-    }
-    try:
-        db = lmdb.open(db_path, **open_kwargs)
-    except lmdb.Error:
-        # Some Windows environments reject file-mode LMDBs for temporary paths.
-        # Fall back to directory-mode so the produced dataset remains readable
-        # via the dataset loader on both Windows and Linux.
-        for maybe_partial in (db_path, f"{db_path}-lock"):
-            if os.path.exists(maybe_partial):
-                os.remove(maybe_partial)
-        os.makedirs(db_path, exist_ok=True)
-        open_kwargs["subdir"] = True
-        open_kwargs["map_async"] = False
-        open_kwargs["meminit"] = True
-        db = lmdb.open(db_path, **open_kwargs)
+    db = _open_lmdb_for_writing(db_path, args.map_size_gb * 1024**3)
 
     targets_list, masks_list = [], []
     natoms_list, neighbors_list = [], []
     written = 0
+    failed = 0
+    failed_samples = []
     with db.begin(write=True) as txn:
         for row_idx, row in enumerate(tqdm(rows, desc=f"Writing {out_dir}")):
-            data_object, targets, mask, natoms, neighbors = build_data_object(
-                a2g, row, row_idx, task_schema, args
-            )
+            try:
+                data_object, targets, mask, natoms, neighbors = build_data_object(
+                    a2g, row, row_idx, task_schema, args
+                )
+            except Exception as exc:
+                if not args.skip_failed:
+                    db.close()
+                    raise
+                failed += 1
+                failed_samples.append(
+                    {
+                        "row_idx": row_idx,
+                        "sample_id": str(row.get(args.id_column, row_idx)),
+                        "error": str(exc),
+                    }
+                )
+                continue
             txn.put(f"{written}".encode("ascii"), pickle.dumps(data_object, protocol=-1))
             targets_list.append(targets)
             masks_list.append(mask)
@@ -265,7 +328,10 @@ def write_lmdb_split(rows, out_dir, task_schema, args):
     stats = compute_stats(task_schema, targets_list, masks_list)
     write_metadata(out_dir, natoms_list, neighbors_list)
     write_schema(out_dir, task_schema, stats)
-    return {"num_samples": written, **stats}
+    if failed_samples:
+        with open(os.path.join(out_dir, "failed_samples.json"), "w", encoding="utf-8") as handle:
+            json.dump(failed_samples, handle, indent=2)
+    return {"num_samples": written, "num_failed": failed, **stats}
 
 
 def write_manifest(manifest_path, split_rows, id_column):
@@ -304,6 +370,9 @@ def run_preprocess(args: argparse.Namespace):
             write_manifest(os.path.join(fold_dir, "split_manifest.json"), split_rows, args.id_column)
             fold_summary = {}
             for split_name, split_data in split_rows.items():
+                if not split_data:
+                    fold_summary[split_name] = {"num_samples": 0, "num_failed": 0}
+                    continue
                 out_dir = os.path.join(fold_dir, split_name)
                 fold_summary[split_name] = write_lmdb_split(split_data, out_dir, task_schema, args)
             summaries[f"fold_{fold_idx}"] = fold_summary
@@ -323,6 +392,9 @@ def run_preprocess(args: argparse.Namespace):
     write_manifest(os.path.join(args.out_root, "split_manifest.json"), split_rows, args.id_column)
     summary = {}
     for split_name, split_data in split_rows.items():
+        if not split_data:
+            summary[split_name] = {"num_samples": 0, "num_failed": 0}
+            continue
         out_dir = os.path.join(args.out_root, split_name)
         summary[split_name] = write_lmdb_split(split_data, out_dir, task_schema, args)
     with open(os.path.join(args.out_root, "summary.json"), "w", encoding="utf-8") as handle:

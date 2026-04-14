@@ -94,11 +94,12 @@ class BaseTrainer(ABC):
         amp=False,
         cpu=False,
         name="base_trainer",
-        slurm={},
+        slurm=None,
         loss=None,
         extra_config=None,
     ):
         self.name = name
+        slurm = {} if slurm is None else slurm
         self.cpu = cpu
         self.is_vis = is_vis
         self.epoch = 0

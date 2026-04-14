@@ -180,74 +180,76 @@ def run_predict(
     )
 
     temp_dir = None
-    if input_csv is not None:
-        temp_dir = tempfile.TemporaryDirectory(prefix="matpropnet_predict_")
-        working_input = _ensure_prediction_csv_schema(
-            input_csv,
-            str(Path(temp_dir.name) / "predict_input.csv"),
-            _infer_task_columns(config),
-        )
-        task_specs = list(config.get("task", {}).get("tasks", {}).values())
-        preprocess_args = Namespace(
-            csv=working_input,
-            out_path=str(Path(temp_dir.name) / "predict"),
-            out_root=None,
-            id_column="id",
-            cif_column="cif",
-            target_columns=",".join(_infer_task_columns(config)),
-            task_types=",".join(
-                spec.get("type", "regression") for spec in task_specs
-            ),
-            num_classes=",".join(
-                str(spec.get("num_classes", 2))
-                for spec in task_specs
-                if spec.get("type") == "classification"
+    try:
+        if input_csv is not None:
+            temp_dir = tempfile.TemporaryDirectory(prefix="matpropnet_predict_")
+            working_input = _ensure_prediction_csv_schema(
+                input_csv,
+                str(Path(temp_dir.name) / "predict_input.csv"),
+                _infer_task_columns(config),
             )
-            or None,
-            cif_mode="auto",
-            cif_root=None,
-            radius=config.get("model", {}).get("backbone", {}).get("cutoff", 6.0),
-            max_neigh=config.get("model", {}).get("backbone", {}).get(
-                "max_neighbors", 50
-            ),
-            get_edges=not config.get("model", {}).get("backbone", {}).get(
-                "otf_graph", False
-            ),
-            skip_failed=False,
-            map_size_gb=1,
-            split=None,
-            split_seed=0,
-            split_column=None,
-            kfolds=0,
-            fold_val_ratio=0.1,
-        )
-        run_preprocess_job(preprocess_args)
-        config["dataset"] = {
-            "test": {
-                "src": str(Path(temp_dir.name) / "predict" / "data.lmdb")
+            task_specs = list(config.get("task", {}).get("tasks", {}).values())
+            preprocess_args = Namespace(
+                csv=working_input,
+                out_path=str(Path(temp_dir.name) / "predict"),
+                out_root=None,
+                id_column="id",
+                cif_column="cif",
+                target_columns=",".join(_infer_task_columns(config)),
+                task_types=",".join(
+                    spec.get("type", "regression") for spec in task_specs
+                ),
+                num_classes=",".join(
+                    str(spec.get("num_classes", 2))
+                    for spec in task_specs
+                    if spec.get("type") == "classification"
+                )
+                or None,
+                cif_mode="auto",
+                cif_root=None,
+                radius=config.get("model", {}).get("backbone", {}).get("cutoff", 6.0),
+                max_neigh=config.get("model", {}).get("backbone", {}).get(
+                    "max_neighbors", 50
+                ),
+                get_edges=not config.get("model", {}).get("backbone", {}).get(
+                    "otf_graph", False
+                ),
+                skip_failed=False,
+                map_size_gb=1,
+                split=None,
+                split_seed=0,
+                split_column=None,
+                kfolds=0,
+                fold_val_ratio=0.1,
+            )
+            run_preprocess_job(preprocess_args)
+            config["dataset"] = {
+                "test": {
+                    "src": str(Path(temp_dir.name) / "predict" / "data.lmdb")
+                }
             }
-        }
 
-    if dry_run:
-        return config
+        if dry_run:
+            return config
 
-    trainer = _build_trainer(config)
-    task = _build_task(config, trainer)
-    if input_csv is None:
-        task.run()
-        return trainer
+        trainer = _build_trainer(config)
+        task = _build_task(config, trainer)
+        if input_csv is None:
+            task.run()
+            return trainer
 
-    predictions = trainer.predict(
-        trainer.test_loader,
-        results_file=None,
-        disable_tqdm=config.get("hide_eval_progressbar", False),
-    )
-    trainer.close_datasets()
-    if output:
-        _write_prediction_csv(predictions, output)
-    if temp_dir is not None:
-        temp_dir.cleanup()
-    return predictions
+        predictions = trainer.predict(
+            trainer.test_loader,
+            results_file=None,
+            disable_tqdm=config.get("hide_eval_progressbar", False),
+        )
+        trainer.close_datasets()
+        if output:
+            _write_prediction_csv(predictions, output)
+        return predictions
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
 
 def run_preprocess(**kwargs):

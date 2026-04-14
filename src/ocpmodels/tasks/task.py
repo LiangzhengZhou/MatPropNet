@@ -76,10 +76,10 @@ class TrainTask(BaseTask):
 @registry.register_task("predict")
 class PredictTask(BaseTask):
     def run(self):
-        assert (
-            self.trainer.test_loader is not None
-        ), "Test dataset is required for making predictions"
-        assert self.config["checkpoint"]
+        if self.trainer.test_loader is None:
+            raise ValueError("Test dataset is required for making predictions.")
+        if not self.config["checkpoint"]:
+            raise ValueError("A checkpoint is required for prediction.")
         results_file = "predictions"
         self.trainer.predict(
             self.trainer.test_loader,
@@ -92,10 +92,10 @@ class PredictTask(BaseTask):
 class ValidateTask(BaseTask):
     def run(self):
         # Note that the results won't be precise on multi GPUs due to padding of extra images (although the difference should be minor)
-        assert (
-            self.trainer.val_loader is not None
-        ), "Val dataset is required for making predictions"
-        assert self.config["checkpoint"]
+        if self.trainer.val_loader is None:
+            raise ValueError("Val dataset is required for making predictions.")
+        if not self.config["checkpoint"]:
+            raise ValueError("A checkpoint is required for validation.")
         self.trainer.validate(
             split="val",
             disable_tqdm=self.config.get("hide_eval_progressbar", False),
