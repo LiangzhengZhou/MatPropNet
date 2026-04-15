@@ -10,6 +10,7 @@ import errno
 import json
 import logging
 import os
+import pickle
 import random
 import subprocess
 from abc import ABC, abstractmethod
@@ -40,6 +41,25 @@ from ocpmodels.common.utils import (
     save_checkpoint,
     warmup_lr_lambda,
 )
+
+
+def _load_torch_checkpoint_compat(checkpoint_path, map_location):
+    try:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError as exc:
+        message = str(exc)
+        if "Weights only load failed" not in message:
+            raise
+        logging.warning(
+            "Checkpoint %s requires legacy torch.load(weights_only=False) "
+            "compatibility mode. Falling back for trusted local checkpoint.",
+            checkpoint_path,
+        )
+        return torch.load(
+            checkpoint_path,
+            map_location=map_location,
+            weights_only=False,
+        )
 from ocpmodels.modules.evaluator import Evaluator
 from ocpmodels.modules.exponential_moving_average import (
     ExponentialMovingAverage,
@@ -439,7 +459,9 @@ class BaseTrainer(ABC):
 
         logging.info(f"Loading checkpoint from: {checkpoint_path}")
         map_location = torch.device("cpu") if self.cpu else self.device
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        checkpoint = _load_torch_checkpoint_compat(
+            checkpoint_path, map_location=map_location
+        )
         self.epoch = checkpoint.get("epoch", 0)
         self.step = checkpoint.get("step", 0)
 
