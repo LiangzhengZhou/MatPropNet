@@ -15,6 +15,7 @@ setup(
             "matpropnet-train=matpropnet.cli.train:main",
             "matpropnet-eval=matpropnet.cli.eval:main",
             "matpropnet-predict=matpropnet.cli.predict:main",
+            "matpropnet-embed-vis=matpropnet.cli.embed_vis:main",
         ]
     },
     install_requires=[
@@ -32,5 +33,10 @@ setup(
         "dev": ["pytest>=7.0"],
         "logging": ["tensorboard>=2.12", "wandb>=0.16"],
         "materials": ["pymatgen>=2023.5"],
+        "visualization": [
+            "matplotlib>=3.7",
+            "scikit-learn>=1.3",
+            "umap-learn>=0.5",
+        ],
     },
 )

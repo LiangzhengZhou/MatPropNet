@@ -254,6 +254,14 @@ def _open_lmdb_for_writing(db_path, map_size):
                 "map_async": True,
             }
         )
+        attempts.append(
+            {
+                "map_size": candidate_size,
+                "subdir": False,
+                "meminit": False,
+                "map_async": False,
+            }
+        )
     for candidate_size in candidate_map_sizes:
         attempts.append(
             {

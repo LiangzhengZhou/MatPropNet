@@ -21,6 +21,7 @@ refocuses the project on reusable crystal and materials property learning.
 - CSV -> LMDB preprocessing for CIF-based crystal datasets
 - GemNet, SpinConv, DimeNet++, ForceNet, DimeNet, SchNet, and CGCNN backbones under one training interface
 - unified multi-task loss weighting with static, GradNorm, and uncertainty modes
+- checkpoint-driven embedding visualization for `z`, `graph_emb`, and pooled `node_emb`
 
 ## Project Layout
 
@@ -67,6 +68,7 @@ matpropnet-preprocess --csv /path/to/all.csv --out-root /path/to/output
 matpropnet-train --config /path/to/config.yml
 matpropnet-eval --config /path/to/config.yml --checkpoint /path/to/model.pt
 matpropnet-predict --config /path/to/config.yml --checkpoint /path/to/model.pt --input /path/to/test.csv --output /path/to/preds.csv
+matpropnet-embed-vis --config /path/to/config.yml --checkpoint /path/to/model.pt --lmdb /path/to/test/data.lmdb --representation z --reducer pca --out-dir /path/to/embed_vis
 ```
 
 The legacy wrappers `python main.py --mode ...` and `python scripts/preprocess_property.py ...`
@@ -156,6 +158,7 @@ GemNet can now be used in two modes:
 - [Config Guide](docs/config_guide.md)
 - [Refactor Guide](docs/general_materials_framework_refactor.md)
 - [Property Quickstart](docs/property_quickstart.md)
+- [Embedding Visualization](docs/embedding_visualization.md)
 
 ## License and Attribution
 

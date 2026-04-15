@@ -131,7 +131,40 @@ matpropnet-predict \
 ```
 
 
-## 5. Finetune controls
+## 5. Visualize embeddings from a checkpoint
+
+Generate 2D embedding plots from `z` or `graph_emb` for an existing LMDB split:
+
+```bash
+matpropnet-embed-vis \
+  --config configs/property/gemnet_multitask.yml \
+  --checkpoint checkpoints/<run-id>/best_checkpoint.pt \
+  --lmdb data/property/test/data.lmdb \
+  --representation z \
+  --reducer pca \
+  --out-dir analysis/embed_vis
+```
+
+This writes:
+
+- `analysis/embed_vis/embedding_table.csv`
+- `analysis/embed_vis/plot_spec.yaml`
+- `analysis/embed_vis/figures/*.png`
+
+For multi-task runs, the command generates one figure per task, each colored by
+that task's target value.
+
+Replot later without rerunning the model:
+
+```bash
+matpropnet-embed-vis \
+  --plot-spec analysis/embed_vis/plot_spec.yaml \
+  --embedding-table analysis/embed_vis/embedding_table.csv \
+  --out-dir analysis/embed_vis_replot
+```
+
+
+## 6. Finetune controls
 
 Add this to the config if you want to freeze the backbone:
 

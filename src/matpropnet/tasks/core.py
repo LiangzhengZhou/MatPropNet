@@ -10,6 +10,10 @@ from pathlib import Path
 
 from matpropnet.config import load_config
 from matpropnet.preprocessing import run_preprocess as run_preprocess_job
+from matpropnet.visualization import (
+    generate_embedding_visualizations,
+    replot_embedding_visualizations,
+)
 from ocpmodels.common.registry import registry
 from ocpmodels.common.utils import setup_imports
 
@@ -255,3 +259,111 @@ def run_predict(
 def run_preprocess(**kwargs):
     args = Namespace(**kwargs)
     return run_preprocess_job(args)
+
+
+def run_embedding_visualization(
+    config_or_path,
+    *,
+    checkpoint: str | None = None,
+    lmdb: str | None = None,
+    output_dir: str | None = None,
+    representation: str = "z",
+    reducer: str = "pca",
+    tasks: list[str] | None = None,
+    node_reduction: str = "mean",
+    reducer_params: dict | None = None,
+    plot_params: dict | None = None,
+    save_format: str = "png",
+    plot_spec: str | None = None,
+    embedding_table: str | None = None,
+    overrides=None,
+    dry_run: bool = False,
+    **runtime_kwargs,
+):
+    reducer_params = reducer_params or {}
+    plot_params = plot_params or {}
+
+    if plot_spec is not None:
+        if dry_run:
+            return {
+                "mode": "replot",
+                "plot_spec": plot_spec,
+                "embedding_table": embedding_table,
+                "output_dir": output_dir,
+            }
+        return replot_embedding_visualizations(
+            plot_spec_path=plot_spec,
+            embedding_table_path=embedding_table,
+            output_dir=output_dir,
+        )
+
+    if checkpoint is None:
+        raise ValueError("checkpoint is required unless plot_spec is provided.")
+
+    config = _load_runtime_config(
+        config_or_path,
+        overrides=overrides,
+        mode="predict",
+        checkpoint=checkpoint,
+        **runtime_kwargs,
+    )
+
+    if lmdb is not None:
+        config["dataset"] = {"test": {"src": lmdb}}
+
+    if output_dir is None:
+        output_dir = str(Path(config["run_dir"]) / "embedding_vis")
+
+    predict_cfg = copy.deepcopy(config.get("task", {}).get("predict", {}))
+    predict_cfg["export_latent"] = representation == "z"
+    predict_cfg["export_graph_emb"] = representation == "graph_emb"
+    predict_cfg["export_node_emb"] = representation == "node_emb"
+    config.setdefault("task", {})["predict"] = predict_cfg
+
+    task_names = tasks or list(config.get("task", {}).get("tasks", {}).keys())
+    if not task_names:
+        raise ValueError("No tasks found for embedding visualization.")
+
+    if dry_run:
+        return {
+            "mode": "compute",
+            "checkpoint": checkpoint,
+            "lmdb": lmdb,
+            "output_dir": output_dir,
+            "representation": representation,
+            "reducer": reducer,
+            "tasks": task_names,
+            "node_reduction": node_reduction,
+            "reducer_params": reducer_params,
+            "plot_params": plot_params,
+            "save_format": save_format,
+        }
+
+    trainer = _build_trainer(config)
+    _build_task(config, trainer)
+    try:
+        predictions = trainer.predict(
+            trainer.test_loader,
+            results_file=None,
+            disable_tqdm=config.get("hide_eval_progressbar", False),
+        )
+    finally:
+        trainer.close_datasets()
+
+    metadata = {
+        "checkpoint": checkpoint,
+        "lmdb": lmdb or config.get("dataset", {}).get("test", {}).get("src"),
+        "config": str(config_or_path) if isinstance(config_or_path, (str, Path)) else None,
+    }
+    return generate_embedding_visualizations(
+        predictions,
+        task_names=task_names,
+        representation=representation,
+        reducer_name=reducer,
+        reducer_params=reducer_params,
+        plot_params=plot_params,
+        output_dir=output_dir,
+        save_format=save_format,
+        node_reduction=node_reduction,
+        metadata=metadata,
+    )
