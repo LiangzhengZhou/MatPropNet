@@ -148,7 +148,10 @@ class GemNetT(torch.nn.Module):
         assert self.cutoff <= 6 or otf_graph
 
         self.max_neighbors = max_neighbors
-        assert self.max_neighbors == 50 or otf_graph
+        if self.max_neighbors < 1:
+            raise ValueError(
+                "GemNetT requires max_neighbors to be a positive integer."
+            )
 
         self.regress_forces = regress_forces
         self.otf_graph = otf_graph
