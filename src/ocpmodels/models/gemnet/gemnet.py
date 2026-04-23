@@ -145,7 +145,8 @@ class GemNetT(torch.nn.Module):
         self.build_output_blocks = build_output_blocks
 
         self.cutoff = cutoff
-        assert self.cutoff <= 6 or otf_graph
+        if self.cutoff <= 0:
+            raise ValueError("GemNetT requires cutoff to be a positive number.")
 
         self.max_neighbors = max_neighbors
         if self.max_neighbors < 1:
