@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -30,6 +31,7 @@ from ocpmodels.modules.loss_weighting import build_loss_weighting_strategy
 from ocpmodels.modules.normalizer import Normalizer
 from ocpmodels.modules.scheduler import LRScheduler
 from ocpmodels.trainers.base_trainer import BaseTrainer
+from matpropnet.modules.losses import build_regression_loss
 
 
 @registry.register_trainer("property")
@@ -83,13 +85,30 @@ class PropertyTrainer(BaseTrainer):
 
     def load_task(self):
         tasks_cfg = self.config["task"].get("tasks")
+        default_loss_config = self.config["task"].get("loss", self.config.get("loss"))
         if tasks_cfg:
-            self.task_specs = OrderedDict(tasks_cfg.items())
+            self.task_specs = OrderedDict()
+            for task_name, raw_spec in tasks_cfg.items():
+                spec = copy.deepcopy(raw_spec)
+                if spec.get("loss") is None and default_loss_config is not None:
+                    spec["loss"] = copy.deepcopy(default_loss_config)
+                self.task_specs[task_name] = spec
         else:
             labels = self.config["task"].get("labels", ["target"])
             task_type = self.config["task"].get("type", "regression")
             self.task_specs = OrderedDict(
-                (label, {"type": task_type, "weight": 1.0})
+                (
+                    label,
+                    {
+                        "type": task_type,
+                        "weight": 1.0,
+                        **(
+                            {"loss": copy.deepcopy(default_loss_config)}
+                            if default_loss_config is not None
+                            else {}
+                        ),
+                    },
+                )
                 for label in labels
             )
         self.task_names = list(self.task_specs.keys())
@@ -112,6 +131,97 @@ class PropertyTrainer(BaseTrainer):
         self.loss_weighting = build_loss_weighting_strategy(
             self.config, self.task_specs
         ).to(self.device)
+
+    def _read_training_schema_stats(self):
+        dataset_cfg = self.config.get("dataset")
+        if not dataset_cfg:
+            return {}
+        src = dataset_cfg[0]["src"] if isinstance(dataset_cfg, list) else dataset_cfg["src"]
+        src_path = Path(src)
+        schema_path = src_path.parent / "target_schema.json"
+        if src_path.is_dir() and src_path.name != "train":
+            schema_path = src_path / "target_schema.json"
+        if not schema_path.exists():
+            return {}
+        with schema_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload.get("stats", {})
+
+    def _collect_training_target_stats(self):
+        schema_stats = self._read_training_schema_stats()
+        values_by_task = {task_name: [] for task_name in self.task_names}
+
+        for sample_idx in range(len(self.train_dataset)):
+            data = self.train_dataset[sample_idx]
+            target = torch.as_tensor(data.y).view(-1)
+            target_mask = getattr(
+                data,
+                "target_mask",
+                torch.ones_like(target, dtype=torch.bool),
+            ).view(-1).bool()
+            for task_name, task_idx in self.task_name_to_idx.items():
+                if not target_mask[task_idx]:
+                    continue
+                if self.task_specs[task_name].get("type", "regression") != "regression":
+                    continue
+                values_by_task[task_name].append(float(target[task_idx].item()))
+
+        per_task_stats = {}
+        target_mean = schema_stats.get("target_mean", [])
+        target_std = schema_stats.get("target_std", [])
+        for task_name, task_idx in self.task_name_to_idx.items():
+            if self.task_specs[task_name].get("type", "regression") != "regression":
+                per_task_stats[task_name] = {}
+                continue
+            task_values = np.asarray(values_by_task[task_name], dtype=np.float32)
+            if task_values.size == 0:
+                per_task_stats[task_name] = {}
+                continue
+            per_task_stats[task_name] = {
+                "values": task_values.tolist(),
+                "min": float(np.min(task_values)),
+                "p25": float(np.percentile(task_values, 25)),
+                "p50": float(np.percentile(task_values, 50)),
+                "p75": float(np.percentile(task_values, 75)),
+                "p90": float(np.percentile(task_values, 90)),
+                "p95": float(np.percentile(task_values, 95)),
+                "p99": float(np.percentile(task_values, 99)),
+                "max": float(np.max(task_values)),
+                "mean": float(np.mean(task_values)),
+                "std": float(np.std(task_values)) if float(np.std(task_values)) > 1e-12 else 1.0,
+            }
+            if task_idx < len(target_mean):
+                per_task_stats[task_name]["mean"] = float(target_mean[task_idx])
+            if task_idx < len(target_std):
+                per_task_stats[task_name]["std"] = float(target_std[task_idx])
+        return per_task_stats
+
+    def _log_loss_configuration(self):
+        if not distutils.is_master():
+            return
+        for task_name in self.task_names:
+            loss_fn = self.loss_fns[task_name]
+            if not hasattr(loss_fn, "describe"):
+                logging.info(
+                    "Loss configuration for task '%s': base loss=%s",
+                    task_name,
+                    loss_fn.__class__.__name__,
+                )
+                continue
+            description = loss_fn.describe()
+            logging.info("Loss configuration for task '%s':", task_name)
+            for key, value in description.items():
+                if key == "bins" and isinstance(value, list):
+                    logging.info("  Bin-balanced loss weights:")
+                    for item in value:
+                        logging.info(
+                            "    %s: count=%s, weight=%.4f",
+                            item["range"],
+                            item["count"],
+                            item["weight"],
+                        )
+                    continue
+                logging.info("  %s: %s", key, value)
 
     def get_sampler(self, dataset, batch_size, shuffle):
         if self.config["optim"].get("disable_load_balancing", False):
@@ -252,6 +362,7 @@ class PropertyTrainer(BaseTrainer):
 
     def load_loss(self):
         self.loss_fns = {}
+        self.training_target_stats = self._collect_training_target_stats()
         for task_name, spec in self.task_specs.items():
             loss_name = spec.get("loss")
             if loss_name is None:
@@ -260,14 +371,17 @@ class PropertyTrainer(BaseTrainer):
                     if spec.get("type") == "classification"
                     else "mae"
                 )
-            loss_name = loss_name.lower()
-            if loss_name in {"mae", "l1"}:
-                self.loss_fns[task_name] = nn.L1Loss()
-            elif loss_name == "mse":
-                self.loss_fns[task_name] = nn.MSELoss()
-            elif loss_name in {"smooth_l1", "huber"}:
-                self.loss_fns[task_name] = nn.SmoothL1Loss()
-            elif loss_name in {"cross_entropy", "ce"}:
+            if spec.get("type") == "regression":
+                self.loss_fns[task_name] = build_regression_loss(
+                    task_name=task_name,
+                    config=loss_name,
+                    training_stats=self.training_target_stats.get(task_name, {}),
+                ).to(self.device)
+                continue
+            if isinstance(loss_name, dict):
+                loss_name = loss_name.get("name")
+            loss_name = str(loss_name).lower()
+            if loss_name in {"cross_entropy", "ce"}:
                 self.loss_fns[task_name] = nn.CrossEntropyLoss()
             elif loss_name in {"bce", "bce_with_logits"}:
                 self.loss_fns[task_name] = nn.BCEWithLogitsLoss()
@@ -275,6 +389,7 @@ class PropertyTrainer(BaseTrainer):
                 raise NotImplementedError(
                     f"Unsupported loss '{loss_name}' for task '{task_name}'"
                 )
+        self._log_loss_configuration()
 
     def load_optimizer(self):
         optimizer_cls = getattr(
@@ -452,6 +567,7 @@ class PropertyTrainer(BaseTrainer):
         target_mask = target_mask.view(-1, self.num_targets).bool()
 
         task_losses = {}
+        task_loss_stats = {}
         for task_name, spec in self.task_specs.items():
             idx = self.task_name_to_idx[task_name]
             valid_mask = target_mask[:, idx]
@@ -464,11 +580,15 @@ class PropertyTrainer(BaseTrainer):
                     target = target.float()
                 else:
                     target = target.long()
-            task_losses[task_name] = self.loss_fns[task_name](pred, target)
-        return task_losses
+                task_losses[task_name] = self.loss_fns[task_name](pred, target)
+                continue
+            task_loss, task_stats = self.loss_fns[task_name](pred, target)
+            task_losses[task_name] = task_loss
+            task_loss_stats.update(task_stats)
+        return task_losses, task_loss_stats
 
     def _compute_loss(self, out, batch_list, is_training=True):
-        task_losses = self._compute_task_losses(out, batch_list)
+        task_losses, task_loss_stats = self._compute_task_losses(out, batch_list)
         total_loss, loss_weighting_stats = self.loss_weighting.compute_weighted_loss(
             task_losses,
             self._build_loss_weighting_context(is_training=is_training),
@@ -477,6 +597,7 @@ class PropertyTrainer(BaseTrainer):
             task_name: loss_value.detach()
             for task_name, loss_value in task_losses.items()
         }
+        out["loss_component_stats"] = task_loss_stats
         out["loss_weighting_stats"] = loss_weighting_stats
         return total_loss
 
@@ -565,6 +686,9 @@ class PropertyTrainer(BaseTrainer):
             metrics = self._update_metric(
                 metrics, f"{task_name}_loss", float(loss_value.item()), 1
             )
+        for key, value in out.get("loss_component_stats", {}).items():
+            if isinstance(value, (int, float)):
+                metrics = self._update_metric(metrics, key, float(value), 1)
         for key, value in out.get("loss_weighting_stats", {}).items():
             if isinstance(value, (int, float)):
                 metrics = self._update_metric(metrics, key, float(value), 1)
@@ -679,6 +803,9 @@ class PropertyTrainer(BaseTrainer):
                     metrics, "loss", loss.detach().item(), 1
                 )
                 log_dict = {k: v["metric"] for k, v in metrics.items()}
+                for key, value in out.get("loss_component_stats", {}).items():
+                    if isinstance(value, (int, float)):
+                        log_dict[key] = float(value)
                 for key, value in out.get("loss_weighting_stats", {}).items():
                     if isinstance(value, (int, float)):
                         log_dict[key] = float(value)

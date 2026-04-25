@@ -124,6 +124,7 @@ The property stack supports:
 - latent output via `return_latent=True`
 - missing-label masking
 - weighted multi-task losses
+- configurable regression losses with sample weighting and asymmetric penalties
 - train / val / test splits
 - K-fold preprocessing support
 
@@ -158,6 +159,7 @@ GemNet can now be used in two modes:
 - [Config Guide](docs/config_guide.md)
 - [Refactor Guide](docs/general_materials_framework_refactor.md)
 - [Property Quickstart](docs/property_quickstart.md)
+- [Loss Configuration](docs/loss_configuration.md)
 - [Embedding Visualization](docs/embedding_visualization.md)
 
 ## License and Attribution
