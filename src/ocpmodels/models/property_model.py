@@ -87,6 +87,16 @@ class RegressionHead(nn.Module):
         return self.network(z)
 
 
+class GaussianRegressionHead(nn.Module):
+    def __init__(self, in_dim: int, hidden_dim: int):
+        super().__init__()
+        self.network = _build_mlp(in_dim, hidden_dim, 2, num_layers=2)
+
+    def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        mu, log_var = self.network(z).chunk(2, dim=-1)
+        return mu.view(-1), log_var.view(-1)
+
+
 class ClassificationHead(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int, out_dim: int):
         super().__init__()
@@ -539,12 +549,22 @@ class PropertyModel(BaseModel):
                     out_dim,
                 )
             else:
-                out_dim = int(spec.get("out_dim", 1))
-                self.heads[task_name] = RegressionHead(
-                    latent_dim,
-                    spec.get("hidden_dim", latent_hidden),
-                    out_dim,
+                output_cfg = spec.get("output", {})
+                distribution = spec.get("output_distribution") or output_cfg.get(
+                    "distribution"
                 )
+                if distribution == "gaussian":
+                    self.heads[task_name] = GaussianRegressionHead(
+                        latent_dim,
+                        spec.get("hidden_dim", latent_hidden),
+                    )
+                else:
+                    out_dim = int(spec.get("out_dim", 1))
+                    self.heads[task_name] = RegressionHead(
+                        latent_dim,
+                        spec.get("hidden_dim", latent_hidden),
+                        out_dim,
+                    )
 
     def freeze_backbone(self):
         for param in self.backbone.parameters():
@@ -573,14 +593,22 @@ class PropertyModel(BaseModel):
         z = self.latent_projector(graph_emb)
 
         preds = OrderedDict()
+        log_vars = OrderedDict()
         for task_name, head in self.heads.items():
-            pred = head(z)
+            head_output = head(z)
+            if isinstance(head_output, tuple):
+                pred, log_var = head_output
+                log_vars[task_name] = log_var
+            else:
+                pred = head_output
             if pred.shape[-1] == 1:
                 pred = pred.view(-1)
             preds[task_name] = pred
 
         pred_output = next(iter(preds.values())) if len(preds) == 1 else preds
         output = {"pred": pred_output, "task_preds": preds}
+        if log_vars:
+            output["task_log_vars"] = log_vars
         if return_latent or self.return_latent_by_default:
             output["z"] = z
             output["node_emb"] = node_emb

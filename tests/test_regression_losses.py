@@ -117,3 +117,21 @@ def test_log_cosh_loss_is_finite():
     loss, _ = loss_fn(pred, target)
 
     assert torch.isfinite(loss)
+
+
+def test_gaussian_nll_uses_log_variance():
+    loss_fn = build_regression_loss(
+        task_name="H",
+        config={"name": "gaussian_nll", "min_log_var": -5.0, "max_log_var": 5.0},
+        training_stats={},
+    )
+    pred = torch.tensor([1.0, 3.0], dtype=torch.float32)
+    target = torch.tensor([0.0, 1.0], dtype=torch.float32)
+    log_var = torch.tensor([0.0, 1.0], dtype=torch.float32)
+
+    loss, stats = loss_fn(pred, target, log_var=log_var)
+
+    expected = 0.5 * torch.exp(-log_var) * (pred - target).pow(2) + 0.5 * log_var
+    assert torch.isclose(loss, expected.mean())
+    assert "loss/log_var_mean/H" in stats
+    assert "loss/sigma_mean/H" in stats

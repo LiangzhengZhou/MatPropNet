@@ -69,6 +69,9 @@ matpropnet-train --config /path/to/config.yml
 matpropnet-eval --config /path/to/config.yml --checkpoint /path/to/model.pt
 matpropnet-predict --config /path/to/config.yml --checkpoint /path/to/model.pt --input /path/to/test.csv --output /path/to/preds.csv
 matpropnet-embed-vis --config /path/to/config.yml --checkpoint /path/to/model.pt --lmdb /path/to/test/data.lmdb --representation z --reducer pca --out-dir /path/to/embed_vis
+matpropnet-ensemble-train --config /path/to/ensemble.yml
+matpropnet-ensemble-predict --manifest /path/to/ensemble_manifest.json --lmdb /path/to/new/data.lmdb --out-dir /path/to/ensemble_pred
+matpropnet-ensemble-aggregate --predictions member_0.csv member_1.csv member_2.csv --out ensemble.csv
 ```
 
 The legacy wrappers `python main.py --mode ...` and `python scripts/preprocess_property.py ...`
@@ -160,6 +163,7 @@ GemNet can now be used in two modes:
 - [Refactor Guide](docs/general_materials_framework_refactor.md)
 - [Property Quickstart](docs/property_quickstart.md)
 - [Loss Configuration](docs/loss_configuration.md)
+- [Deep Ensemble Uncertainty](docs/deep_ensemble_uncertainty.md)
 - [Embedding Visualization](docs/embedding_visualization.md)
 
 ## License and Attribution

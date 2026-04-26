@@ -1,0 +1,23 @@
+ensemble:
+  name: gemnet_target1_deep_ensemble
+  base_config: gemnet_single_task_gaussian_nll.yml
+  output_dir: ../../runs/gemnet_target1_deep_ensemble
+
+  num_members: 5
+  seeds: [11, 23, 37, 51, 71]
+
+  train:
+    mode: sequential
+    checkpoint_name: best_checkpoint.pt
+    overwrite: false
+
+  evaluate:
+    splits:
+      - val
+      - test
+
+  aggregate:
+    tasks:
+      - target1
+    include_members: true
+

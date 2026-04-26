@@ -92,6 +92,7 @@ class PropertyTrainer(BaseTrainer):
                 spec = copy.deepcopy(raw_spec)
                 if spec.get("loss") is None and default_loss_config is not None:
                     spec["loss"] = copy.deepcopy(default_loss_config)
+                self._maybe_enable_probabilistic_regression(spec)
                 self.task_specs[task_name] = spec
         else:
             labels = self.config["task"].get("labels", ["target"])
@@ -111,6 +112,8 @@ class PropertyTrainer(BaseTrainer):
                 )
                 for label in labels
             )
+            for spec in self.task_specs.values():
+                self._maybe_enable_probabilistic_regression(spec)
         self.task_names = list(self.task_specs.keys())
         self.task_name_to_idx = {
             name: idx for idx, name in enumerate(self.task_names)
@@ -132,11 +135,31 @@ class PropertyTrainer(BaseTrainer):
             self.config, self.task_specs
         ).to(self.device)
 
+    @staticmethod
+    def _maybe_enable_probabilistic_regression(spec):
+        if spec.get("type", "regression") != "regression":
+            return
+        loss_cfg = spec.get("loss")
+        loss_name = loss_cfg.get("name") if isinstance(loss_cfg, dict) else loss_cfg
+        output_cfg = spec.setdefault("output", {})
+        if str(loss_name).lower() in {"gaussian_nll", "nll_gaussian"}:
+            output_cfg.setdefault("distribution", "gaussian")
+
     def _read_training_schema_stats(self):
         dataset_cfg = self.config.get("dataset")
         if not dataset_cfg:
             return {}
-        src = dataset_cfg[0]["src"] if isinstance(dataset_cfg, list) else dataset_cfg["src"]
+        if isinstance(dataset_cfg, list):
+            src = dataset_cfg[0].get("src")
+        elif isinstance(dataset_cfg, dict) and "src" in dataset_cfg:
+            src = dataset_cfg["src"]
+        elif isinstance(dataset_cfg, dict) and "train" in dataset_cfg:
+            train_cfg = dataset_cfg["train"]
+            src = train_cfg[0].get("src") if isinstance(train_cfg, list) else train_cfg.get("src")
+        else:
+            return {}
+        if not src:
+            return {}
         src_path = Path(src)
         schema_path = src_path.parent / "target_schema.json"
         if src_path.is_dir() and src_path.name != "train":
@@ -150,6 +173,12 @@ class PropertyTrainer(BaseTrainer):
     def _collect_training_target_stats(self):
         schema_stats = self._read_training_schema_stats()
         values_by_task = {task_name: [] for task_name in self.task_names}
+
+        if not hasattr(self, "train_dataset"):
+            return {
+                task_name: {}
+                for task_name in self.task_names
+            }
 
         for sample_idx in range(len(self.train_dataset)):
             data = self.train_dataset[sample_idx]
@@ -486,6 +515,23 @@ class PropertyTrainer(BaseTrainer):
         std = self.normalizers["target"].std[idx].to(prediction.device)
         return prediction * std + mean
 
+    def _denormalize_sigma(self, task_name, sigma):
+        if "target" not in self.normalizers:
+            return sigma
+        idx = self.task_name_to_idx[task_name]
+        if self.task_specs[task_name].get("type", "regression") != "regression":
+            return sigma
+        std = self.normalizers["target"].std[idx].to(sigma.device)
+        return sigma * std
+
+    def _clamp_task_log_var(self, task_name, log_var):
+        loss_cfg = self.task_specs[task_name].get("loss", {})
+        if not isinstance(loss_cfg, dict):
+            return log_var
+        min_log_var = float(loss_cfg.get("min_log_var", -10.0))
+        max_log_var = float(loss_cfg.get("max_log_var", 5.0))
+        return torch.clamp(log_var, min=min_log_var, max=max_log_var)
+
     def _forward(self, batch_list):
         return self.model(batch_list)
 
@@ -559,6 +605,7 @@ class PropertyTrainer(BaseTrainer):
     def _compute_task_losses(self, out, batch_list):
         batch = self._split_batch(batch_list).to(self.device)
         preds = out["task_preds"]
+        log_vars = out.get("task_log_vars", {})
         targets = batch.y.to(self.device).view(-1, self.num_targets)
         targets_normed = self._normalize_targets(targets)
         target_mask = getattr(batch, "target_mask", torch.ones_like(targets)).to(
@@ -582,7 +629,14 @@ class PropertyTrainer(BaseTrainer):
                     target = target.long()
                 task_losses[task_name] = self.loss_fns[task_name](pred, target)
                 continue
-            task_loss, task_stats = self.loss_fns[task_name](pred, target)
+            task_log_var = (
+                log_vars[task_name][valid_mask]
+                if task_name in log_vars
+                else None
+            )
+            task_loss, task_stats = self.loss_fns[task_name](
+                pred, target, log_var=task_log_var
+            )
             task_losses[task_name] = task_loss
             task_loss_stats.update(task_stats)
         return task_losses, task_loss_stats
@@ -947,6 +1001,9 @@ class PropertyTrainer(BaseTrainer):
             predictions[f"target_{task_name}"] = []
             if self.task_specs[task_name].get("type", "regression") == "classification":
                 predictions[f"prob_{task_name}"] = []
+            elif self.task_specs[task_name].get("output", {}).get("distribution") == "gaussian":
+                predictions[f"pred_{task_name}_log_var"] = []
+                predictions[f"pred_{task_name}_sigma"] = []
         if include_z:
             predictions["z"] = []
         if include_graph_emb:
@@ -968,6 +1025,7 @@ class PropertyTrainer(BaseTrainer):
                     batch_list, return_latent=return_latent
                 )
             preds = out["task_preds"]
+            log_vars = out.get("task_log_vars", {})
             targets = batch.y.view(-1, self.num_targets)
             ids = self._extract_sample_ids(batch)
             predictions["id"].extend(ids)
@@ -977,6 +1035,17 @@ class PropertyTrainer(BaseTrainer):
                 pred = preds[task_name].detach().cpu()
                 if self.task_specs[task_name].get("type", "regression") == "regression":
                     pred = self._denormalize_prediction(task_name, pred).cpu()
+                    if task_name in log_vars:
+                        log_var = log_vars[task_name].detach().cpu()
+                        log_var = self._clamp_task_log_var(task_name, log_var)
+                        sigma = torch.exp(0.5 * log_var)
+                        sigma = self._denormalize_sigma(task_name, sigma).cpu()
+                        predictions[f"pred_{task_name}_log_var"].extend(
+                            log_var.tolist()
+                        )
+                        predictions[f"pred_{task_name}_sigma"].extend(
+                            sigma.tolist()
+                        )
                 elif pred.ndim > 1 and pred.shape[-1] > 1:
                     prob = torch.softmax(pred, dim=-1)
                     predictions[f"prob_{task_name}"].extend(

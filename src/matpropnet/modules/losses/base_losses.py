@@ -100,3 +100,39 @@ class LogCoshLoss(BaseRegressionLoss):
         error = pred - target
         return error + F.softplus(-2.0 * error) - math.log(2.0)
 
+
+@register_base_loss("gaussian_nll")
+@register_base_loss("nll_gaussian")
+class GaussianNLLLoss(BaseRegressionLoss):
+    loss_name = "gaussian_nll"
+
+    def __init__(self, min_log_var: float = -10.0, max_log_var: float = 5.0):
+        super().__init__()
+        if min_log_var >= max_log_var:
+            raise ValueError("Gaussian NLL requires min_log_var < max_log_var.")
+        self.min_log_var = float(min_log_var)
+        self.max_log_var = float(max_log_var)
+
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        log_var: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if log_var is None:
+            raise ValueError("gaussian_nll loss requires model output 'task_log_vars'.")
+        pred, target = _flatten_regression_tensors(pred, target)
+        log_var = log_var.reshape(-1).float()
+        if log_var.shape != pred.shape:
+            raise ValueError(
+                f"Gaussian NLL expects log_var shape {pred.shape}, got {log_var.shape}."
+            )
+        log_var = torch.clamp(log_var, min=self.min_log_var, max=self.max_log_var)
+        error = pred - target
+        return 0.5 * torch.exp(-log_var) * error * error + 0.5 * log_var
+
+    def extra_repr_dict(self) -> dict[str, float]:
+        return {
+            "min_log_var": self.min_log_var,
+            "max_log_var": self.max_log_var,
+        }

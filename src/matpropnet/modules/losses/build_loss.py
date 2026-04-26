@@ -119,10 +119,14 @@ class ConfigurableRegressionLoss(nn.Module):
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
+        log_var: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         pred = pred.reshape(-1).float()
         target = target.reshape(-1).float()
-        per_sample_loss = self.base_loss(pred, target)
+        if self.base_loss.loss_name == "gaussian_nll":
+            per_sample_loss = self.base_loss(pred, target, log_var=log_var)
+        else:
+            per_sample_loss = self.base_loss(pred, target)
         sample_weight = self.sample_weight(target)
         effective_weight = self.asymmetry(pred, target, sample_weight)
         effective_weight = torch.nan_to_num(
@@ -138,6 +142,20 @@ class ConfigurableRegressionLoss(nn.Module):
             f"loss/max_weight/{self.task_name}": float(effective_weight.max().detach().cpu()),
             f"loss/min_weight/{self.task_name}": float(effective_weight.min().detach().cpu()),
         }
+        if log_var is not None:
+            log_var_for_stats = log_var.reshape(-1).float()
+            if self.base_loss.loss_name == "gaussian_nll":
+                log_var_for_stats = torch.clamp(
+                    log_var_for_stats,
+                    min=self.base_loss.min_log_var,
+                    max=self.base_loss.max_log_var,
+                )
+            stats[f"loss/log_var_mean/{self.task_name}"] = float(
+                log_var_for_stats.mean().detach().cpu()
+            )
+            stats[f"loss/sigma_mean/{self.task_name}"] = float(
+                torch.exp(0.5 * log_var_for_stats).mean().detach().cpu()
+            )
         return weighted_loss, stats
 
     def describe(self) -> OrderedDict[str, object]:
@@ -163,4 +181,3 @@ def build_regression_loss(
         config=normalize_loss_config(config),
         training_stats=training_stats,
     )
-

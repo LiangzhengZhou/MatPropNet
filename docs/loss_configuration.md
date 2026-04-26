@@ -63,6 +63,11 @@ These per-task losses are computed before the existing multi-task
 - `huber`
 - `smooth_l1`
 - `log_cosh`
+- `gaussian_nll`
+
+`gaussian_nll` enables a probabilistic regression head for the task. The model
+predicts both `mu` and `log_var`; `mu` is kept in `task_preds`, while `log_var`
+is returned in `task_log_vars` for loss computation and prediction export.
 
 ## Supported sample-weight strategies
 
@@ -95,4 +100,5 @@ During training and validation, the trainer logs:
 - `loss/mean_weight/<task>`
 - `loss/max_weight/<task>`
 - `loss/min_weight/<task>`
-
+- `loss/log_var_mean/<task>` when using `gaussian_nll`
+- `loss/sigma_mean/<task>` when using `gaussian_nll`
