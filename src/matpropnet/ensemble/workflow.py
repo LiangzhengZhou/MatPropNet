@@ -19,6 +19,7 @@ from matpropnet.tasks.core import (
     _write_prediction_csv,
     run_train,
 )
+from matpropnet.utils.runtime import setup_runtime_logging
 
 
 def _read_yaml(path: str | Path) -> dict[str, Any]:
@@ -116,6 +117,16 @@ def _checkpoint_path_for_trainer(trainer, checkpoint_name: str) -> str:
     if not checkpoint.exists():
         raise FileNotFoundError(f"Expected checkpoint was not found: {checkpoint}")
     return str(checkpoint)
+
+
+def _member_log_file(member_dir: Path, train_cfg: dict[str, Any]) -> str | None:
+    log_file_name = train_cfg.get("log_file_name", "train.log")
+    if not log_file_name:
+        return None
+    log_file = Path(log_file_name).expanduser()
+    if not log_file.is_absolute():
+        log_file = member_dir / log_file
+    return str(log_file)
 
 
 def _predict_checkpoint_on_lmdb(
@@ -252,6 +263,9 @@ def run_ensemble_train(
                 "index": idx,
                 "seed": seed,
                 "run_dir": str(members_dir / f"member_{idx:03d}"),
+                "log_file": _member_log_file(
+                    members_dir / f"member_{idx:03d}", ensemble_cfg["train"]
+                ),
             }
             for idx, seed in enumerate(ensemble_cfg["seeds"])
         ]
@@ -265,6 +279,12 @@ def run_ensemble_train(
         member_config["run_dir"] = str(member_dir)
         member_config["identifier"] = f"member_{idx:03d}"
         _write_yaml(member_config, member_dir / "config.resolved.yml")
+        log_file = _member_log_file(member_dir, ensemble_cfg["train"])
+        setup_runtime_logging(
+            level=ensemble_cfg["train"].get("log_level", "INFO"),
+            log_file=log_file,
+            force=True,
+        )
         trainer = run_train(
             member_config,
             run_dir=str(member_dir),
@@ -281,6 +301,7 @@ def run_ensemble_train(
             "run_dir": str(member_dir),
             "config": str(member_dir / "config.resolved.yml"),
             "checkpoint": checkpoint,
+            "log_file": log_file,
             "predictions": {},
         }
         for split in evaluate_splits:
@@ -380,4 +401,3 @@ def run_ensemble_predict(
     }
     _write_json(summary, output_dir / "prediction_manifest.json")
     return summary
-

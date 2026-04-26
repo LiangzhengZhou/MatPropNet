@@ -38,6 +38,7 @@ def setup_runtime_logging(
     if force:
         for handler in list(root.handlers):
             root.removeHandler(handler)
+            handler.close()
     root.setLevel(level)
     formatter = logging.Formatter(
         "%(asctime)s (%(levelname)s): %(message)s",

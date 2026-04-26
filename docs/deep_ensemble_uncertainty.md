@@ -75,6 +75,7 @@ ensemble:
   train:
     mode: sequential
     checkpoint_name: best_checkpoint.pt
+    log_file_name: train.log
     overwrite: false
 
   evaluate:
@@ -101,6 +102,7 @@ with different training seeds. The output directory contains:
 ensemble_manifest.json
 base_config.resolved.yml
 members/member_000/config.resolved.yml
+members/member_000/train.log
 members/member_000/checkpoints/.../best_checkpoint.pt
 members/member_000/ensemble_predictions/test.csv
 aggregate/test_ensemble.csv
@@ -108,8 +110,19 @@ aggregate/ensemble_metrics.json
 ```
 
 `ensemble_manifest.json` is the index for the ensemble. It records each member's
-seed, run directory, resolved config, checkpoint, and prediction files. Keep it
-with the run because `matpropnet-ensemble-predict` uses it later.
+seed, run directory, resolved config, text log file, checkpoint, and prediction
+files. Keep it with the run because `matpropnet-ensemble-predict` uses it later.
+
+By default, each member writes a traditional text log to
+`members/member_XXX/train.log` in addition to TensorBoard logs. You can customize
+or disable this with:
+
+```yaml
+ensemble:
+  train:
+    log_file_name: train.log  # set to null to disable member text logs
+    log_level: INFO
+```
 
 ## Predicting a new LMDB
 

@@ -75,6 +75,10 @@ def test_ensemble_train_dry_run_expands_members(tmp_path):
     assert plan["dry_run"] is True
     assert plan["num_members"] == 2
     assert [member["seed"] for member in plan["planned_members"]] == [11, 23]
+    assert Path(plan["planned_members"][0]["log_file"]).parts[-2:] == (
+        "member_000",
+        "train.log",
+    )
 
 
 def test_ensemble_train_writes_manifest_and_aggregate(monkeypatch, tmp_path):
@@ -128,6 +132,49 @@ def test_ensemble_train_writes_manifest_and_aggregate(monkeypatch, tmp_path):
     loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert len(loaded["members"]) == 2
     assert loaded["aggregate"]["test"] == str(aggregate_path)
+    assert Path(loaded["members"][0]["log_file"]).parts[-2:] == (
+        "member_000",
+        "train.log",
+    )
+    assert (tmp_path / "ensemble_run" / "members" / "member_000" / "train.log").exists()
+
+
+def test_ensemble_train_can_disable_member_log_file(monkeypatch, tmp_path):
+    base_path = tmp_path / "base.yml"
+    ensemble_path = tmp_path / "ensemble.yml"
+    ensemble_cfg = _ensemble_config(tmp_path, base_path)
+    ensemble_cfg["ensemble"]["train"]["log_file_name"] = None
+    _write_yaml(base_path, _base_config(tmp_path))
+    _write_yaml(ensemble_path, ensemble_cfg)
+
+    class DummyTrainer:
+        def __init__(self, checkpoint_dir):
+            self.config = {"cmd": {"checkpoint_dir": str(checkpoint_dir)}}
+
+    def fake_run_train(config, **kwargs):
+        checkpoint_dir = Path(kwargs["run_dir"]) / "checkpoints" / f"seed_{kwargs['seed']}"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "best_checkpoint.pt").write_text("checkpoint", encoding="utf-8")
+        return DummyTrainer(checkpoint_dir)
+
+    def fake_predict(**kwargs):
+        output_csv = Path(kwargs["output_csv"])
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        with output_csv.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["id", "pred_H"])
+            writer.writeheader()
+            writer.writerow({"id": "sample-1", "pred_H": 1.0})
+        return {}
+
+    monkeypatch.setattr("matpropnet.ensemble.workflow.run_train", fake_run_train)
+    monkeypatch.setattr(
+        "matpropnet.ensemble.workflow._predict_checkpoint_on_lmdb", fake_predict
+    )
+
+    manifest = run_ensemble_train(ensemble_path)
+
+    assert manifest["members"][0]["log_file"] is None
+    assert not (tmp_path / "ensemble_run" / "members" / "member_000" / "train.log").exists()
 
 
 def test_ensemble_predict_uses_manifest_members(monkeypatch, tmp_path):

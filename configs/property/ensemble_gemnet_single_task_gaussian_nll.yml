@@ -9,6 +9,7 @@ ensemble:
   train:
     mode: sequential
     checkpoint_name: best_checkpoint.pt
+    log_file_name: train.log
     overwrite: false
 
   evaluate:
@@ -20,4 +21,3 @@ ensemble:
     tasks:
       - target1
     include_members: true
-
