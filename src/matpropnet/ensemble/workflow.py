@@ -11,7 +11,12 @@ import numpy as np
 import yaml
 
 from matpropnet.config import load_config
-from matpropnet.ensemble.aggregate import aggregate_ensemble_predictions
+from matpropnet.ensemble.aggregate import (
+    _write_csv,
+    aggregate_ensemble_predictions,
+    apply_uncertainty_calibration,
+    fit_uncertainty_calibration,
+)
 from matpropnet.tasks.core import (
     _build_task,
     _build_trainer,
@@ -175,7 +180,11 @@ def _ensemble_metrics(rows: list[dict[str, Any]], tasks: list[str]) -> dict[str,
     for task_name in tasks:
         target_key = f"target_{task_name}"
         pred_key = f"pred_{task_name}_mean"
-        var_key = f"pred_{task_name}_var_total"
+        var_key = (
+            f"pred_{task_name}_var_total_calibrated"
+            if rows and f"pred_{task_name}_var_total_calibrated" in rows[0]
+            else f"pred_{task_name}_var_total"
+        )
         usable = [
             row
             for row in rows
@@ -216,6 +225,19 @@ def _ensemble_metrics(rows: list[dict[str, Any]], tasks: list[str]) -> dict[str,
     return metrics
 
 
+def _calibration_options(config: dict[str, Any]) -> dict[str, Any]:
+    calibration = config.get("calibration", {})
+    if not calibration:
+        return {"enabled": False}
+    return {
+        "enabled": bool(calibration.get("enabled", False)),
+        "source_split": calibration.get("source_split", "val"),
+        "min_variance": float(calibration.get("min_variance", 1.0e-12)),
+        "min_scale": float(calibration.get("min_scale", 1.0)),
+        "max_scale": float(calibration.get("max_scale", 100.0)),
+    }
+
+
 def run_ensemble_train(
     ensemble_config_path: str | Path,
     *,
@@ -241,6 +263,7 @@ def run_ensemble_train(
     tasks = ensemble_cfg.get("aggregate", {}).get("tasks") or _task_names(base_config)
     evaluate_splits = list(ensemble_cfg.get("evaluate", {}).get("splits") or [])
     include_members = bool(ensemble_cfg.get("aggregate", {}).get("include_members", True))
+    calibration_cfg = _calibration_options(ensemble_cfg)
 
     _write_yaml({"ensemble": ensemble_cfg}, output_dir / "ensemble_config.yml")
     _write_yaml(base_config, output_dir / "base_config.resolved.yml")
@@ -324,6 +347,8 @@ def run_ensemble_train(
         _write_json(manifest, output_dir / "ensemble_manifest.json")
 
     metrics: dict[str, Any] = {}
+    split_rows: dict[str, list[dict[str, Any]]] = {}
+    split_paths: dict[str, Path] = {}
     for split in evaluate_splits:
         prediction_files = [
             member["predictions"][split]
@@ -340,6 +365,33 @@ def run_ensemble_train(
             include_members=include_members,
         )
         manifest["aggregate"][split] = str(aggregate_csv)
+        split_rows[split] = rows
+        split_paths[split] = aggregate_csv
+    if calibration_cfg["enabled"]:
+        source_split = calibration_cfg["source_split"]
+        source_rows = split_rows.get(source_split)
+        if source_rows:
+            calibration = fit_uncertainty_calibration(
+                source_rows,
+                tasks,
+                min_variance=calibration_cfg["min_variance"],
+                min_scale=calibration_cfg["min_scale"],
+                max_scale=calibration_cfg["max_scale"],
+            )
+            if calibration:
+                manifest["uncertainty_calibration"] = {
+                    "source_split": source_split,
+                    "tasks": calibration,
+                }
+                _write_json(calibration, aggregate_dir / "uncertainty_calibration.json")
+                for split, rows in split_rows.items():
+                    apply_uncertainty_calibration(
+                        rows,
+                        calibration,
+                        min_variance=calibration_cfg["min_variance"],
+                    )
+                    _write_csv(rows, split_paths[split])
+    for split, rows in split_rows.items():
         split_metrics = _ensemble_metrics(rows, tasks)
         if split_metrics:
             metrics[split] = split_metrics
@@ -366,6 +418,7 @@ def run_ensemble_predict(
     members_out = output_dir / "members"
     members_out.mkdir(parents=True, exist_ok=True)
     tasks = tasks or manifest.get("tasks") or _task_names(base_config)
+    calibration = manifest.get("uncertainty_calibration", {}).get("tasks")
 
     prediction_files = []
     for member in manifest["members"]:
@@ -387,6 +440,7 @@ def run_ensemble_predict(
         output_path=aggregate_csv,
         tasks=tasks,
         include_members=include_members,
+        calibration=calibration,
     )
     metrics = _ensemble_metrics(rows, tasks)
     if metrics:

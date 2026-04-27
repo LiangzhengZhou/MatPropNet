@@ -21,3 +21,9 @@ ensemble:
     tasks:
       - target1
     include_members: true
+
+  calibration:
+    enabled: true
+    source_split: val
+    min_scale: 1.0
+    max_scale: 100.0

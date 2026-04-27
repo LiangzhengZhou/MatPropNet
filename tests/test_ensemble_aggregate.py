@@ -3,7 +3,11 @@ from __future__ import annotations
 import csv
 import math
 
-from matpropnet.ensemble import aggregate_ensemble_predictions
+from matpropnet.ensemble import (
+    aggregate_ensemble_predictions,
+    apply_uncertainty_calibration,
+    fit_uncertainty_calibration,
+)
 from matpropnet.cli.ensemble_aggregate import main as ensemble_aggregate_main
 
 
@@ -77,3 +81,64 @@ def test_ensemble_aggregate_cli(tmp_path):
 
     assert exit_code == 0
     assert out.exists()
+
+
+def test_uncertainty_calibration_inflates_total_variance():
+    rows = [
+        {
+            "target_H": "3.0",
+            "pred_H_mean": "1.0",
+            "pred_H_var_total": "1.0",
+        },
+        {
+            "target_H": "2.0",
+            "pred_H_mean": "1.0",
+            "pred_H_var_total": "1.0",
+        },
+    ]
+
+    calibration = fit_uncertainty_calibration(rows, ["H"])
+    calibrated = apply_uncertainty_calibration(rows, calibration)
+
+    assert math.isclose(calibration["H"]["variance_scale"], 2.5)
+    assert math.isclose(calibrated[0]["pred_H_var_total_calibrated"], 2.5)
+    assert math.isclose(
+        calibrated[0]["pred_H_std_total_calibrated"], math.sqrt(2.5)
+    )
+
+
+def test_ensemble_aggregate_cli_can_calibrate_from_validation_csv(tmp_path):
+    member0 = tmp_path / "member0.csv"
+    member1 = tmp_path / "member1.csv"
+    val = tmp_path / "val_ensemble.csv"
+    out = tmp_path / "ensemble.csv"
+    _write_csv(member0, [{"id": "a", "pred_H": "1.0", "pred_H_sigma": "1.0"}])
+    _write_csv(member1, [{"id": "a", "pred_H": "1.0", "pred_H_sigma": "1.0"}])
+    _write_csv(
+        val,
+        [
+            {
+                "id": "a",
+                "target_H": "3.0",
+                "pred_H_mean": "1.0",
+                "pred_H_var_total": "1.0",
+            }
+        ],
+    )
+
+    exit_code = ensemble_aggregate_main(
+        [
+            "--predictions",
+            str(member0),
+            str(member1),
+            "--out",
+            str(out),
+            "--calibrate-from",
+            str(val),
+        ]
+    )
+
+    assert exit_code == 0
+    with out.open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert math.isclose(float(row["pred_H_var_total_calibrated"]), 4.0)

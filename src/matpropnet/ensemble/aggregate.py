@@ -60,12 +60,82 @@ def _write_csv(rows: list[dict[str, Any]], output_path: str | Path):
         writer.writerows(rows)
 
 
+def fit_uncertainty_calibration(
+    rows: list[dict[str, Any]],
+    tasks: list[str],
+    *,
+    min_variance: float = 1.0e-12,
+    min_scale: float = 1.0,
+    max_scale: float = 100.0,
+) -> dict[str, dict[str, float]]:
+    """Fit a scalar post-hoc variance calibration from rows with targets.
+
+    For each task, this estimates a scalar ``s`` such that
+    ``s * pred_var_total`` better matches squared residuals on a calibration
+    split, usually validation. ``min_scale=1`` keeps this conservative by only
+    inflating over-confident uncertainties.
+    """
+
+    calibration: dict[str, dict[str, float]] = {}
+    for task_name in tasks:
+        target_key = f"target_{task_name}"
+        mean_key = f"pred_{task_name}_mean"
+        var_key = f"pred_{task_name}_var_total"
+        ratios = []
+        for row in rows:
+            if (
+                row.get(target_key) in (None, "")
+                or row.get(mean_key) in (None, "")
+                or row.get(var_key) in (None, "")
+            ):
+                continue
+            target = _as_float(row[target_key])
+            pred = _as_float(row[mean_key])
+            variance = max(_as_float(row[var_key]), min_variance)
+            if not all(math.isfinite(value) for value in (target, pred, variance)):
+                continue
+            ratios.append((target - pred) ** 2 / variance)
+        if not ratios:
+            continue
+        scale = float(np.mean(np.asarray(ratios, dtype=np.float64)))
+        scale = min(max(scale, min_scale), max_scale)
+        calibration[task_name] = {
+            "variance_scale": scale,
+            "std_scale": math.sqrt(scale),
+            "num_samples": float(len(ratios)),
+        }
+    return calibration
+
+
+def apply_uncertainty_calibration(
+    rows: list[dict[str, Any]],
+    calibration: dict[str, dict[str, float]],
+    *,
+    min_variance: float = 1.0e-12,
+) -> list[dict[str, Any]]:
+    for row in rows:
+        for task_name, task_calibration in calibration.items():
+            var_key = f"pred_{task_name}_var_total"
+            if row.get(var_key) in (None, ""):
+                continue
+            scale = float(task_calibration["variance_scale"])
+            variance = max(_as_float(row[var_key]), min_variance)
+            calibrated_variance = variance * scale
+            row[f"pred_{task_name}_var_total_calibrated"] = calibrated_variance
+            row[f"pred_{task_name}_std_total_calibrated"] = math.sqrt(
+                calibrated_variance
+            )
+            row[f"pred_{task_name}_uncertainty_scale"] = scale
+    return rows
+
+
 def aggregate_ensemble_predictions(
     prediction_files: list[str | Path],
     *,
     output_path: str | Path | None = None,
     tasks: list[str] | None = None,
     include_members: bool = True,
+    calibration: dict[str, dict[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
     member_rows = [_read_prediction_csv(path) for path in prediction_files]
     _validate_member_rows(member_rows)
@@ -128,7 +198,9 @@ def aggregate_ensemble_predictions(
                         out_row[f"pred_{task_name}_sigma_member_{member_idx}"] = value
         aggregated_rows.append(out_row)
 
+    if calibration:
+        apply_uncertainty_calibration(aggregated_rows, calibration)
+
     if output_path is not None:
         _write_csv(aggregated_rows, output_path)
     return aggregated_rows
-

@@ -87,6 +87,12 @@ ensemble:
     tasks:
       - H
     include_members: true
+
+  calibration:
+    enabled: true
+    source_split: val
+    min_scale: 1.0
+    max_scale: 100.0
 ```
 
 Then run:
@@ -107,6 +113,7 @@ members/member_000/checkpoints/.../best_checkpoint.pt
 members/member_000/ensemble_predictions/test.csv
 aggregate/test_ensemble.csv
 aggregate/ensemble_metrics.json
+aggregate/uncertainty_calibration.json
 ```
 
 `ensemble_manifest.json` is the index for the ensemble. It records each member's
@@ -166,3 +173,48 @@ The output contains:
 If member CSV files do not contain `pred_H_sigma`, aggregation still works but
 `std_aleatoric` is set to zero. In that case the ensemble is a deterministic
 ensemble and `std_epistemic` is only a model-disagreement proxy.
+
+## Post-Hoc Uncertainty Calibration
+
+Deep ensembles can still be over-confident: the mean prediction can be wrong
+while both epistemic and aleatoric standard deviations remain too small. To
+avoid rewriting the trained models, MatPropNet supports scalar post-hoc
+calibration of total predictive variance:
+
+```text
+var_total_calibrated = scale * var_total
+scale = mean_val((target - pred_mean)^2 / max(var_total, eps))
+```
+
+This is fitted on the validation aggregate CSV and then applied to all aggregate
+splits. The original uncertainty columns are kept, and calibrated columns are
+added:
+
+- `pred_H_var_total_calibrated`
+- `pred_H_std_total_calibrated`
+- `pred_H_uncertainty_scale`
+
+Enable it in the ensemble config:
+
+```yaml
+ensemble:
+  calibration:
+    enabled: true
+    source_split: val
+    min_scale: 1.0   # conservative: only inflate over-confident variance
+    max_scale: 100.0
+```
+
+When predicting a new LMDB with `matpropnet-ensemble-predict`, the calibration
+stored in `ensemble_manifest.json` is automatically applied to the new ensemble
+CSV.
+
+For an existing run, you can also recalibrate a new aggregate CSV manually:
+
+```bash
+matpropnet-ensemble-aggregate \
+  --predictions member_000/ensemble_predictions/test.csv member_001/ensemble_predictions/test.csv \
+  --out test_ensemble_calibrated.csv \
+  --tasks H \
+  --calibrate-from aggregate/val_ensemble.csv
+```

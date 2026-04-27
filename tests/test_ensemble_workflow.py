@@ -139,6 +139,60 @@ def test_ensemble_train_writes_manifest_and_aggregate(monkeypatch, tmp_path):
     assert (tmp_path / "ensemble_run" / "members" / "member_000" / "train.log").exists()
 
 
+def test_ensemble_train_can_calibrate_uncertainty_from_val(monkeypatch, tmp_path):
+    base_path = tmp_path / "base.yml"
+    ensemble_path = tmp_path / "ensemble.yml"
+    ensemble_cfg = _ensemble_config(tmp_path, base_path)
+    ensemble_cfg["ensemble"]["evaluate"]["splits"] = ["val", "test"]
+    ensemble_cfg["ensemble"]["calibration"] = {"enabled": True, "source_split": "val"}
+    _write_yaml(base_path, _base_config(tmp_path))
+    _write_yaml(ensemble_path, ensemble_cfg)
+
+    class DummyTrainer:
+        def __init__(self, checkpoint_dir):
+            self.config = {"cmd": {"checkpoint_dir": str(checkpoint_dir)}}
+
+    def fake_run_train(config, **kwargs):
+        checkpoint_dir = Path(kwargs["run_dir"]) / "checkpoints" / f"seed_{kwargs['seed']}"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        (checkpoint_dir / "best_checkpoint.pt").write_text("checkpoint", encoding="utf-8")
+        return DummyTrainer(checkpoint_dir)
+
+    def fake_predict(**kwargs):
+        output_csv = Path(kwargs["output_csv"])
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        target = 3.0 if output_csv.name == "val.csv" else 1.0
+        with output_csv.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["id", "pred_H", "pred_H_sigma", "target_H"],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "id": "sample-1",
+                    "pred_H": 1.0,
+                    "pred_H_sigma": 1.0,
+                    "target_H": target,
+                }
+            )
+        return {}
+
+    monkeypatch.setattr("matpropnet.ensemble.workflow.run_train", fake_run_train)
+    monkeypatch.setattr(
+        "matpropnet.ensemble.workflow._predict_checkpoint_on_lmdb", fake_predict
+    )
+
+    manifest = run_ensemble_train(ensemble_path)
+
+    assert manifest["uncertainty_calibration"]["tasks"]["H"]["variance_scale"] == 4.0
+    with (tmp_path / "ensemble_run" / "aggregate" / "test_ensemble.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        row = next(csv.DictReader(handle))
+    assert float(row["pred_H_var_total_calibrated"]) == 4.0
+
+
 def test_ensemble_train_can_disable_member_log_file(monkeypatch, tmp_path):
     base_path = tmp_path / "base.yml"
     ensemble_path = tmp_path / "ensemble.yml"
