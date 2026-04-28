@@ -45,6 +45,7 @@ matpropnet-embed-vis = "matpropnet.cli.embed_vis:main"
 matpropnet-ensemble-aggregate = "matpropnet.cli.ensemble_aggregate:main"
 matpropnet-ensemble-train = "matpropnet.cli.ensemble_train:main"
 matpropnet-ensemble-predict = "matpropnet.cli.ensemble_predict:main"
+matpropnet-benchmark = "matpropnet.cli.benchmark:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -72,6 +72,7 @@ matpropnet-embed-vis --config /path/to/config.yml --checkpoint /path/to/model.pt
 matpropnet-ensemble-train --config /path/to/ensemble.yml
 matpropnet-ensemble-predict --manifest /path/to/ensemble_manifest.json --lmdb /path/to/new/data.lmdb --out-dir /path/to/ensemble_pred
 matpropnet-ensemble-aggregate --predictions member_0.csv member_1.csv member_2.csv --out ensemble.csv
+matpropnet-benchmark --config /path/to/benchmark.yml
 ```
 
 The legacy wrappers `python main.py --mode ...` and `python scripts/preprocess_property.py ...`
@@ -165,6 +166,7 @@ GemNet can now be used in two modes:
 - [Loss Configuration](docs/loss_configuration.md)
 - [Deep Ensemble Uncertainty](docs/deep_ensemble_uncertainty.md)
 - [Embedding Visualization](docs/embedding_visualization.md)
+- [Model Benchmark CLI](docs/benchmark.md)
 
 ## License and Attribution
 

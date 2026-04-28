@@ -1,0 +1,34 @@
+benchmark:
+  name: property_backbone_mae_benchmark
+  output_dir: ../../runs/property_backbone_mae_benchmark
+  seed: 42
+  print_every: 10
+  stop_on_error: false
+
+  train:
+    checkpoint_name: best_checkpoint.pt
+    log_file_name: train.log
+    log_level: INFO
+    amp: false
+    cpu: false
+
+  evaluate:
+    splits:
+      - val
+      - test
+
+  models:
+    - name: gemnet_t
+      config: gemnet_single_task.yml
+    - name: spinconv
+      config: spinconv_single_task.yml
+    - name: dimenetplusplus
+      config: dimenetplusplus_single_task.yml
+    - name: forcenet
+      config: forcenet_single_task.yml
+    - name: dimenet
+      config: dimenet_single_task.yml
+    - name: schnet
+      config: schnet_single_task.yml
+    - name: cgcnn
+      config: cgcnn_single_task.yml
