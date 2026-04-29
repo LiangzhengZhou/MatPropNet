@@ -106,12 +106,7 @@ def test_benchmark_writes_summary_and_manifest(monkeypatch, tmp_path):
             self.closed = False
 
         def validate(self, split="val", disable_tqdm=True):
-            base = 1.0 if split == "val" else 2.0
-            return {
-                "H_mae": {"metric": base},
-                "H_rmse": {"metric": base + 0.5},
-                "loss": {"metric": base + 1.0},
-            }
+            raise AssertionError("benchmark must not reuse the closed train trainer")
 
         def close_datasets(self):
             self.closed = True
@@ -124,7 +119,27 @@ def test_benchmark_writes_summary_and_manifest(monkeypatch, tmp_path):
         )
         return DummyTrainer(checkpoint_dir, Path(kwargs["run_dir"]) / "results")
 
+    def fake_evaluate_checkpoint(**kwargs):
+        assert kwargs["checkpoint"].endswith("best_checkpoint.pt")
+        assert kwargs["run_name"] in {"model_0", "model_1"}
+        return {
+            "val": {
+                "H_mae": {"metric": 1.0},
+                "H_rmse": {"metric": 1.5},
+                "loss": {"metric": 2.0},
+            },
+            "test": {
+                "H_mae": {"metric": 2.0},
+                "H_rmse": {"metric": 2.5},
+                "loss": {"metric": 3.0},
+            },
+        }
+
     monkeypatch.setattr("matpropnet.benchmark.workflow.run_train", fake_run_train)
+    monkeypatch.setattr(
+        "matpropnet.benchmark.workflow._evaluate_checkpoint",
+        fake_evaluate_checkpoint,
+    )
 
     manifest = run_benchmark(benchmark_config)
 
@@ -164,7 +179,7 @@ def test_benchmark_records_failed_model_when_stop_on_error_false(
             self.config = {"cmd": {"checkpoint_dir": str(checkpoint_dir)}}
 
         def validate(self, split="val", disable_tqdm=True):
-            return {"H_mae": {"metric": 1.0}}
+            raise AssertionError("benchmark must not reuse the closed train trainer")
 
         def close_datasets(self):
             pass
@@ -180,6 +195,10 @@ def test_benchmark_records_failed_model_when_stop_on_error_false(
         return DummyTrainer(checkpoint_dir)
 
     monkeypatch.setattr("matpropnet.benchmark.workflow.run_train", fake_run_train)
+    monkeypatch.setattr(
+        "matpropnet.benchmark.workflow._evaluate_checkpoint",
+        lambda **kwargs: {"val": {"H_mae": {"metric": 1.0}}},
+    )
 
     manifest = run_benchmark(benchmark_config)
 

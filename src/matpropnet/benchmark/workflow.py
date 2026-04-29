@@ -13,6 +13,7 @@ import yaml
 
 from matpropnet.config import load_config
 from matpropnet.tasks import run_train
+from matpropnet.tasks.core import _build_task, _build_trainer, _load_runtime_config
 from matpropnet.utils.runtime import setup_runtime_logging
 
 
@@ -128,10 +129,35 @@ def _flatten_metrics(metrics: dict[str, Any], split: str) -> dict[str, Any]:
     return flattened
 
 
-def _evaluate_trainer(trainer, splits: list[str]) -> dict[str, dict[str, Any]]:
+def _evaluate_checkpoint(
+    *,
+    model_config: dict[str, Any],
+    checkpoint: str,
+    run_dir: Path,
+    run_name: str,
+    seed: int,
+    splits: list[str],
+    train_cfg: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    eval_config = _load_runtime_config(
+        model_config,
+        mode="validate",
+        checkpoint=checkpoint,
+        run_dir=str(run_dir / "eval"),
+        identifier=f"{run_name}_eval",
+        seed=seed,
+        amp=train_cfg.get("amp"),
+        cpu=train_cfg.get("cpu"),
+    )
+    eval_config["hide_eval_progressbar"] = True
+    trainer = _build_trainer(eval_config)
+    _build_task(eval_config, trainer)
     results: dict[str, dict[str, Any]] = {}
-    for split in splits:
-        results[split] = trainer.validate(split=split, disable_tqdm=True)
+    try:
+        for split in splits:
+            results[split] = trainer.validate(split=split, disable_tqdm=True)
+    finally:
+        _close_trainer(trainer)
     return results
 
 
@@ -269,7 +295,19 @@ def run_benchmark(
                 trainer, checkpoint_name
             )
             if evaluate_splits:
-                metrics_by_split = _evaluate_trainer(trainer, evaluate_splits)
+                if not row["checkpoint"]:
+                    raise FileNotFoundError(
+                        f"Expected checkpoint was not found for {model_plan['name']}."
+                    )
+                metrics_by_split = _evaluate_checkpoint(
+                    model_config=model_config,
+                    checkpoint=row["checkpoint"],
+                    run_dir=run_dir,
+                    run_name=model_plan["run_name"],
+                    seed=seed,
+                    splits=evaluate_splits,
+                    train_cfg=train_cfg,
+                )
                 for split, metrics in metrics_by_split.items():
                     row.update(_flatten_metrics(metrics, split))
                     prediction_csv = _prediction_csv_for_trainer(trainer, split)
