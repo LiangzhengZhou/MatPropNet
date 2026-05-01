@@ -6,6 +6,8 @@ import datetime as _dt
 import json
 import logging
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +67,8 @@ def _load_benchmark_config(path: str | Path) -> dict[str, Any]:
     config.setdefault("train", {})
     config.setdefault("evaluate", {"splits": ["val", "test"]})
     config.setdefault("stop_on_error", False)
+    config.setdefault("execution", {})
+    config["execution"].setdefault("mode", "subprocess")
     return config
 
 
@@ -188,6 +192,154 @@ def _model_run_plan(
     }
 
 
+def _initial_summary_row(
+    model_plan: dict[str, Any],
+    run_dir: Path,
+    train_cfg: dict[str, Any],
+    seed: int,
+) -> dict[str, Any]:
+    return {
+        "model": model_plan["name"],
+        "run_name": model_plan["run_name"],
+        "status": "running",
+        "seed": seed,
+        "config": model_plan["config"],
+        "run_dir": str(run_dir),
+        "log_file": _log_file_for_run(run_dir, train_cfg),
+        "checkpoint": None,
+        "error": None,
+    }
+
+
+def _run_single_model(
+    *,
+    model_plan: dict[str, Any],
+    train_cfg: dict[str, Any],
+    evaluate_splits: list[str],
+    checkpoint_name: str,
+    seed: int,
+    print_every: int | None,
+) -> dict[str, Any]:
+    run_dir = Path(model_plan["run_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    row = _initial_summary_row(model_plan, run_dir, train_cfg, seed)
+    trainer = None
+    try:
+        model_config = load_config(model_plan["config"])
+        model_config = copy.deepcopy(model_config)
+        model_config["run_dir"] = str(run_dir)
+        model_config["seed"] = seed
+        model_config["identifier"] = model_plan["run_name"]
+        _write_yaml(model_config, run_dir / "config.resolved.yml")
+        setup_runtime_logging(
+            level=train_cfg.get("log_level", "INFO"),
+            log_file=row["log_file"],
+            force=True,
+        )
+        logging.info("Starting benchmark model '%s'.", model_plan["name"])
+        trainer = run_train(
+            model_config,
+            run_dir=str(run_dir),
+            identifier=model_plan["run_name"],
+            seed=seed,
+            print_every=print_every,
+            amp=train_cfg.get("amp"),
+            cpu=train_cfg.get("cpu"),
+        )
+        row["checkpoint"] = _checkpoint_path_for_trainer(trainer, checkpoint_name)
+        if evaluate_splits:
+            if not row["checkpoint"]:
+                raise FileNotFoundError(
+                    f"Expected checkpoint was not found for {model_plan['name']}."
+                )
+            metrics_by_split = _evaluate_checkpoint(
+                model_config=model_config,
+                checkpoint=row["checkpoint"],
+                run_dir=run_dir,
+                run_name=model_plan["run_name"],
+                seed=seed,
+                splits=evaluate_splits,
+                train_cfg=train_cfg,
+            )
+            for split, metrics in metrics_by_split.items():
+                row.update(_flatten_metrics(metrics, split))
+                prediction_csv = _prediction_csv_for_trainer(trainer, split)
+                if prediction_csv:
+                    row[f"{split}_predictions"] = prediction_csv
+        row["status"] = "completed"
+    except Exception as exc:  # pragma: no cover - exercised through tests
+        row["status"] = "failed"
+        row["error"] = f"{type(exc).__name__}: {exc}"
+        logging.exception("Benchmark model '%s' failed.", model_plan["name"])
+    finally:
+        if trainer is not None:
+            _close_trainer(trainer)
+    return row
+
+
+def _run_model_subprocess(payload: dict[str, Any]) -> dict[str, Any]:
+    run_dir = Path(payload["model_plan"]["run_dir"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = run_dir / "benchmark_worker_payload.json"
+    result_path = run_dir / "benchmark_worker_result.json"
+    worker_log_path = run_dir / "benchmark_worker.log"
+    payload["result_path"] = str(result_path)
+    _write_json(payload, payload_path)
+    cmd = [
+        sys.executable,
+        "-m",
+        "matpropnet.cli.benchmark",
+        "--worker-payload",
+        str(payload_path),
+    ]
+    with worker_log_path.open("w", encoding="utf-8") as worker_log:
+        completed = subprocess.run(
+            cmd,
+            stdout=worker_log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+    if result_path.exists():
+        row = _read_yaml(result_path)
+    else:
+        row = _initial_summary_row(
+            payload["model_plan"],
+            run_dir,
+            payload["train_cfg"],
+            int(payload["seed"]),
+        )
+        row["status"] = "failed"
+        row["error"] = (
+            "Benchmark worker exited without writing a result "
+            f"(returncode={completed.returncode}). See {worker_log_path}."
+        )
+    row["worker_log"] = str(worker_log_path)
+    if completed.returncode != 0 and row.get("status") != "failed":
+        row["status"] = "failed"
+        row["error"] = (
+            f"Benchmark worker exited with returncode={completed.returncode}. "
+            f"See {worker_log_path}."
+        )
+    return row
+
+
+def run_benchmark_worker(payload_path: str | Path) -> dict[str, Any]:
+    payload = _read_yaml(payload_path)
+    row = _run_single_model(
+        model_plan=payload["model_plan"],
+        train_cfg=payload["train_cfg"],
+        evaluate_splits=list(payload.get("evaluate_splits") or []),
+        checkpoint_name=payload.get("checkpoint_name", "best_checkpoint.pt"),
+        seed=int(payload.get("seed", 0)),
+        print_every=payload.get("print_every"),
+    )
+    result_path = payload.get("result_path")
+    if result_path:
+        _write_json(row, result_path)
+    return row
+
+
 def run_benchmark(
     benchmark_config_path: str | Path,
     *,
@@ -207,9 +359,15 @@ def run_benchmark(
 
     train_cfg = benchmark_cfg["train"]
     evaluate_cfg = benchmark_cfg["evaluate"]
+    execution_cfg = benchmark_cfg["execution"]
     checkpoint_name = train_cfg.get("checkpoint_name", "best_checkpoint.pt")
     evaluate_splits = list(evaluate_cfg.get("splits") or [])
     seed = int(benchmark_cfg.get("seed", 0))
+    execution_mode = str(execution_cfg.get("mode", "subprocess")).lower()
+    if execution_mode not in {"subprocess", "in_process"}:
+        raise ValueError(
+            "benchmark.execution.mode must be 'subprocess' or 'in_process'."
+        )
 
     seen_names: set[str] = set()
     planned_models = [
@@ -253,85 +411,61 @@ def run_benchmark(
     for model_plan in planned_models:
         run_dir = Path(model_plan["run_dir"])
         run_dir.mkdir(parents=True, exist_ok=True)
-        row: dict[str, Any] = {
-            "model": model_plan["name"],
-            "run_name": model_plan["run_name"],
-            "status": "running",
-            "seed": seed,
-            "config": model_plan["config"],
-            "run_dir": str(run_dir),
-            "log_file": _log_file_for_run(run_dir, train_cfg),
-            "checkpoint": None,
-            "error": None,
-        }
-        trainer = None
         try:
-            model_config = load_config(model_plan["config"])
-            model_config = copy.deepcopy(model_config)
-            model_config["run_dir"] = str(run_dir)
-            model_config["seed"] = seed
-            model_config["identifier"] = model_plan["run_name"]
-            _write_yaml(model_config, run_dir / "config.resolved.yml")
-            setup_runtime_logging(
-                level=train_cfg.get("log_level", "INFO"),
-                log_file=row["log_file"],
-                force=True,
+            print_every = (
+                train_cfg.get("print_every")
+                if train_cfg.get("print_every") is not None
+                else benchmark_cfg.get("print_every")
             )
-            logging.info("Starting benchmark model '%s'.", model_plan["name"])
-            trainer = run_train(
-                model_config,
-                run_dir=str(run_dir),
-                identifier=model_plan["run_name"],
-                seed=seed,
-                print_every=(
-                    train_cfg.get("print_every")
-                    if train_cfg.get("print_every") is not None
-                    else benchmark_cfg.get("print_every")
-                ),
-                amp=train_cfg.get("amp"),
-                cpu=train_cfg.get("cpu"),
-            )
-            row["checkpoint"] = _checkpoint_path_for_trainer(
-                trainer, checkpoint_name
-            )
-            if evaluate_splits:
-                if not row["checkpoint"]:
-                    raise FileNotFoundError(
-                        f"Expected checkpoint was not found for {model_plan['name']}."
-                    )
-                metrics_by_split = _evaluate_checkpoint(
-                    model_config=model_config,
-                    checkpoint=row["checkpoint"],
-                    run_dir=run_dir,
-                    run_name=model_plan["run_name"],
-                    seed=seed,
-                    splits=evaluate_splits,
+            if execution_mode == "in_process":
+                row = _run_single_model(
+                    model_plan=model_plan,
                     train_cfg=train_cfg,
+                    evaluate_splits=evaluate_splits,
+                    checkpoint_name=checkpoint_name,
+                    seed=seed,
+                    print_every=print_every,
                 )
-                for split, metrics in metrics_by_split.items():
-                    row.update(_flatten_metrics(metrics, split))
-                    prediction_csv = _prediction_csv_for_trainer(trainer, split)
-                    if prediction_csv:
-                        row[f"{split}_predictions"] = prediction_csv
-            row["status"] = "completed"
+            else:
+                logging.info(
+                    "Starting benchmark model '%s' in an isolated subprocess.",
+                    model_plan["name"],
+                )
+                row = _run_model_subprocess(
+                    {
+                        "model_plan": model_plan,
+                        "train_cfg": train_cfg,
+                        "evaluate_splits": evaluate_splits,
+                        "checkpoint_name": checkpoint_name,
+                        "seed": seed,
+                        "print_every": print_every,
+                    }
+                )
+                if row.get("status") == "completed":
+                    logging.info(
+                        "Benchmark model '%s' completed.", model_plan["name"]
+                    )
+                else:
+                    logging.error(
+                        "Benchmark model '%s' failed. See %s",
+                        model_plan["name"],
+                        row.get("worker_log"),
+                    )
         except Exception as exc:  # pragma: no cover - exercised through tests
+            row = _initial_summary_row(model_plan, run_dir, train_cfg, seed)
             row["status"] = "failed"
             row["error"] = f"{type(exc).__name__}: {exc}"
             logging.exception("Benchmark model '%s' failed.", model_plan["name"])
-            if benchmark_cfg.get("stop_on_error", False):
-                summary_rows.append(row)
-                manifest["models"] = summary_rows
-                _write_csv(summary_rows, summary_dir / "benchmark_summary.csv")
-                _write_json(summary_rows, summary_dir / "benchmark_summary.json")
-                _write_json(manifest, output_dir / "benchmark_manifest.json")
-                raise
-        finally:
-            if trainer is not None:
-                _close_trainer(trainer)
         summary_rows.append(row)
         manifest["models"] = summary_rows
         _write_csv(summary_rows, summary_dir / "benchmark_summary.csv")
         _write_json(summary_rows, summary_dir / "benchmark_summary.json")
         _write_json(manifest, output_dir / "benchmark_manifest.json")
+        if row.get("status") == "failed" and benchmark_cfg.get(
+            "stop_on_error", False
+        ):
+            raise RuntimeError(
+                f"Benchmark model '{model_plan['name']}' failed: {row.get('error')}"
+            )
 
     return manifest

@@ -87,7 +87,9 @@ def test_benchmark_writes_summary_and_manifest(monkeypatch, tmp_path):
     benchmark_config = tmp_path / "benchmark.yml"
     _write_yaml(config0, _base_config(tmp_path, name="cgcnn"))
     _write_yaml(config1, _base_config(tmp_path, name="schnet"))
-    _write_yaml(benchmark_config, _benchmark_config(tmp_path, [config0, config1]))
+    payload = _benchmark_config(tmp_path, [config0, config1])
+    payload["benchmark"]["execution"] = {"mode": "in_process"}
+    _write_yaml(benchmark_config, payload)
 
     class DummyTrainer:
         def __init__(self, checkpoint_dir: Path, results_dir: Path):
@@ -171,6 +173,7 @@ def test_benchmark_records_failed_model_when_stop_on_error_false(
     _write_yaml(config0, _base_config(tmp_path, name="cgcnn"))
     _write_yaml(config1, _base_config(tmp_path, name="schnet"))
     payload = _benchmark_config(tmp_path, [config0, config1])
+    payload["benchmark"]["execution"] = {"mode": "in_process"}
     payload["benchmark"]["models"][1]["name"] = "will_fail"
     _write_yaml(benchmark_config, payload)
 
@@ -207,3 +210,61 @@ def test_benchmark_records_failed_model_when_stop_on_error_false(
         "failed",
     ]
     assert "RuntimeError: boom" in manifest["models"][1]["error"]
+
+
+def test_benchmark_default_subprocess_reads_worker_results(monkeypatch, tmp_path):
+    config0 = tmp_path / "model0.yml"
+    config1 = tmp_path / "model1.yml"
+    benchmark_config = tmp_path / "benchmark.yml"
+    _write_yaml(config0, _base_config(tmp_path, name="cgcnn"))
+    _write_yaml(config1, _base_config(tmp_path, name="schnet"))
+    _write_yaml(benchmark_config, _benchmark_config(tmp_path, [config0, config1]))
+
+    def fake_run_model_subprocess(payload):
+        model_plan = payload["model_plan"]
+        run_dir = Path(model_plan["run_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if model_plan["run_name"] == "model_0":
+            return {
+                "model": model_plan["name"],
+                "run_name": model_plan["run_name"],
+                "status": "completed",
+                "seed": payload["seed"],
+                "config": model_plan["config"],
+                "run_dir": str(run_dir),
+                "log_file": str(run_dir / "train.log"),
+                "checkpoint": str(run_dir / "checkpoints" / "best_checkpoint.pt"),
+                "error": None,
+                "test_H_mae": 1.23,
+                "worker_log": str(run_dir / "benchmark_worker.log"),
+            }
+        return {
+            "model": model_plan["name"],
+            "run_name": model_plan["run_name"],
+            "status": "failed",
+            "seed": payload["seed"],
+            "config": model_plan["config"],
+            "run_dir": str(run_dir),
+            "log_file": str(run_dir / "train.log"),
+            "checkpoint": None,
+            "error": "RuntimeError: isolated boom",
+            "worker_log": str(run_dir / "benchmark_worker.log"),
+        }
+
+    monkeypatch.setattr(
+        "matpropnet.benchmark.workflow._run_model_subprocess",
+        fake_run_model_subprocess,
+    )
+
+    manifest = run_benchmark(benchmark_config)
+
+    assert [row["status"] for row in manifest["models"]] == [
+        "completed",
+        "failed",
+    ]
+    assert manifest["models"][0]["test_H_mae"] == 1.23
+    assert "isolated boom" in manifest["models"][1]["error"]
+    summary_path = tmp_path / "benchmark_run" / "summary" / "benchmark_summary.csv"
+    with summary_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["worker_log"].endswith("benchmark_worker.log")

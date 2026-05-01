@@ -1,7 +1,9 @@
 # Model Benchmark CLI
 
-`matpropnet-benchmark` runs a list of normal single-model training configs one
-after another and writes a shared comparison table. It is intended for the
+`matpropnet-benchmark` runs a list of normal single-model training configs and
+writes a shared comparison table. By default, each model is trained in a fresh
+Python subprocess, so a CUDA kernel failure in one backbone does not poison the
+remaining benchmark runs. It is intended for the
 first-stage question: which backbone works best on the same preprocessed LMDB
 split, before spending GPU time on deep ensembles.
 
@@ -38,6 +40,9 @@ benchmark:
   print_every: 10
   stop_on_error: false
 
+  execution:
+    mode: subprocess  # subprocess | in_process
+
   train:
     checkpoint_name: best_checkpoint.pt
     log_file_name: train.log
@@ -72,6 +77,9 @@ benchmark_manifest.json
 runs/
   gemnet_t/
     config.resolved.yml
+    benchmark_worker_payload.json
+    benchmark_worker_result.json
+    benchmark_worker.log
     train.log
     checkpoints/...
     results/...
@@ -85,7 +93,8 @@ summary/
 `benchmark_summary.csv` has one row per model. Metric columns are flattened as
 `val_H_mae`, `test_H_mae`, `test_H_rmse`, and so on, based on whatever metrics
 the trainer returns. If a model fails and `stop_on_error: false`, the workflow
-records `status=failed` and the error message, then continues to the next model.
+records `status=failed`, the error message, and `worker_log`, then continues to
+the next model in a clean subprocess.
 
 ## Practical Notes
 
@@ -97,3 +106,6 @@ records `status=failed` and the error message, then continues to the next model.
   comparison, but model selection should primarily look at validation behavior.
 - If a large backbone repeatedly OOMs, reduce its batch size in that model's
   config instead of changing the global benchmark workflow.
+- Keep `execution.mode: subprocess` for real GPU benchmarks. `in_process` is
+  mainly useful for quick local tests because CUDA device-side asserts cannot be
+  safely recovered inside the same Python process.
