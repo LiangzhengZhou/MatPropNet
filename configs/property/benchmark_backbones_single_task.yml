@@ -26,8 +26,6 @@ benchmark:
       config: dimenetplusplus_single_task.yml
     - name: forcenet
       config: forcenet_single_task.yml
-    - name: dimenet
-      config: dimenet_single_task.yml
     - name: schnet
       config: schnet_single_task.yml
     - name: cgcnn

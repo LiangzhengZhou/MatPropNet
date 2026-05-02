@@ -11,8 +11,10 @@ split, before spending GPU time on deep ensembles.
 
 Use this command when you already have train / val / test LMDB files and want to
 compare several model configs under the same task, loss, split, and seed. A
-typical run is GemNet, SpinConv, DimeNet++, ForceNet, DimeNet, SchNet, and
-CGCNN on the same single-task `H` dataset with MAE loss.
+typical run is GemNet, SpinConv, DimeNet++, ForceNet, SchNet, and CGCNN on the
+same single-task `H` dataset with MAE loss. The original DimeNet backbone is not
+included in the default screen because DimeNet++ is the faster and generally
+more accurate successor.
 
 This workflow does not change `matpropnet-train`. Each model is still trained
 through the existing trainer, checkpoint, early-stopping, prediction export, and

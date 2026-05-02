@@ -77,7 +77,6 @@ model:
 Additional supported backbone names:
 
 - `spinconv`
-- `dimenet`
 - `dimenetplusplus` or `dimenet_plus_plus`
 - `forcenet`
 

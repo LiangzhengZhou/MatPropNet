@@ -25,6 +25,19 @@ from ocpmodels.common.utils import (
 )
 from ocpmodels.models.base import BaseModel
 
+
+def _sort_edges_by_target(edge_index, edge_distance, edge_distance_vec):
+    """Keep SpinConv's target-consecutive edge assumptions valid after batching."""
+    if edge_index.numel() == 0:
+        return edge_index, edge_distance, edge_distance_vec
+    num_nodes = int(edge_index.max().detach().cpu().item()) + 1
+    order = torch.argsort(edge_index[1] * num_nodes + edge_index[0])
+    return edge_index[:, order], edge_distance[order], edge_distance_vec[order]
+
+
+def _scalar_item(value):
+    return value.detach().cpu().item()
+
 try:
     from e3nn import o3
     from e3nn.io import SphericalTensor
@@ -546,6 +559,9 @@ class spinconv(BaseModel):
     def _filter_edges(
         self, edge_index, edge_distance, edge_distance_vec, max_num_neighbors
     ):
+        edge_index, edge_distance, edge_distance_vec = _sort_edges_by_target(
+            edge_index, edge_distance, edge_distance_vec
+        )
         # Remove edges that aren't within the closest max_num_neighbors from either the target or source atom.
         # This ensures all edges occur in pairs, i.e., if X -> Y exists then Y -> X is included.
         # However, if both X -> Y and Y -> X don't both exist in the original list, this isn't guaranteed.
@@ -648,6 +664,9 @@ class spinconv(BaseModel):
             edge_distance_vec, edge_distance_vec_mask
         ).view(-1, 3)
 
+        edge_index, edge_distance, edge_distance_vec = _sort_edges_by_target(
+            edge_index, edge_distance, edge_distance_vec
+        )
         return edge_index, edge_distance, edge_distance_vec
 
     def _random_rot_mat(self, num_matrices, device):
@@ -698,25 +717,31 @@ class spinconv(BaseModel):
     def _init_edge_rot_mat(self, data, edge_index, edge_distance_vec):
         device = data.pos.device
         num_atoms = len(data.batch)
+        if edge_index.numel() == 0:
+            raise ValueError("SpinConv received a graph with no valid edges.")
+        edge_min = _scalar_item(edge_index.min())
+        edge_max = _scalar_item(edge_index.max())
+        if edge_min < 0 or edge_max >= num_atoms:
+            raise ValueError(
+                "SpinConv edge_index contains node indices outside the current "
+                f"batch: min={int(edge_min)}, max={int(edge_max)}, "
+                f"num_atoms={num_atoms}."
+            )
+        if not bool(torch.isfinite(edge_distance_vec).all().detach().cpu().item()):
+            raise ValueError("SpinConv edge distance vectors contain NaN or Inf.")
 
         edge_vec_0 = edge_distance_vec
         edge_vec_0_distance = torch.sqrt(torch.sum(edge_vec_0 ** 2, dim=1))
 
-        if torch.min(edge_vec_0_distance) < 0.0001:
-            print(
-                "Error edge_vec_0_distance: {}".format(
-                    torch.min(edge_vec_0_distance)
-                )
-            )
+        if _scalar_item(torch.min(edge_vec_0_distance)) < 0.0001:
             (minval, minidx) = torch.min(edge_vec_0_distance, 0)
-            print(
-                "Error edge_vec_0_distance: {} {} {} {} {}".format(
-                    minidx,
-                    edge_index[0, minidx],
-                    edge_index[1, minidx],
-                    data.pos[edge_index[0, minidx]],
-                    data.pos[edge_index[1, minidx]],
-                )
+            minidx_int = int(_scalar_item(minidx))
+            raise ValueError(
+                "SpinConv found a near-zero edge distance vector, which would "
+                "make the local rotation frame unstable: "
+                f"edge={minidx_int}, src={int(_scalar_item(edge_index[0, minidx]))}, "
+                f"dst={int(_scalar_item(edge_index[1, minidx]))}, "
+                f"distance={float(_scalar_item(minval))}."
             )
 
         avg_vector = torch.zeros(num_atoms, 3, device=device)
@@ -730,11 +755,10 @@ class spinconv(BaseModel):
         edge_vec_2 = avg_vector[edge_index[1, :]] + 0.0001
         edge_vec_2_distance = torch.sqrt(torch.sum(edge_vec_2 ** 2, dim=1))
 
-        if torch.min(edge_vec_2_distance) < 0.000001:
-            print(
-                "Error edge_vec_2_distance: {}".format(
-                    torch.min(edge_vec_2_distance)
-                )
+        if _scalar_item(torch.min(edge_vec_2_distance)) < 0.000001:
+            raise ValueError(
+                "SpinConv found a near-zero averaged neighbor direction, which "
+                "would make the local rotation frame unstable."
             )
 
         norm_x = edge_vec_0 / (edge_vec_0_distance.view(-1, 1))
@@ -1319,6 +1343,30 @@ class ProjectLatLongSphere(torch.nn.Module):
     def forward(self, x, length, index, delta, source_edge_index):
         device = x.device
         hidden_channels = len(x[0])
+        if length <= 0:
+            raise ValueError("SpinConv projection received an empty output size.")
+        if source_edge_index.numel():
+            src_min = _scalar_item(source_edge_index.min())
+            src_max = _scalar_item(source_edge_index.max())
+        else:
+            src_min = src_max = 0
+        if source_edge_index.numel() and (src_min < 0 or src_max >= len(x)):
+            raise ValueError(
+                "SpinConv projection source indices are out of bounds: "
+                f"min={int(src_min)}, max={int(src_max)}, x_len={len(x)}."
+            )
+        max_index = length * self.sphere_size_lat * self.sphere_size_long
+        if index.numel():
+            index_min = _scalar_item(index.min())
+            index_max = _scalar_item(index.max())
+        else:
+            index_min = index_max = 0
+        if index.numel() and (index_min < 0 or index_max >= max_index):
+            raise ValueError(
+                "SpinConv projection indices are out of bounds before CUDA "
+                f"scatter: min={int(index_min)}, max={int(index_max)}, "
+                f"allowed=[0, {max_index - 1}]."
+            )
 
         x_proj = torch.zeros(
             length * self.sphere_size_lat * self.sphere_size_long,
