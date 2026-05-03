@@ -38,6 +38,11 @@ def _sort_edges_by_target(edge_index, edge_distance, edge_distance_vec):
 def _scalar_item(value):
     return value.detach().cpu().item()
 
+
+def _element_table_size(max_num_elements):
+    """Allocate embeddings for real atomic numbers, which are 1-indexed."""
+    return max(int(max_num_elements) + 1, 119)
+
 try:
     from e3nn import o3
     from e3nn.io import SphericalTensor
@@ -87,7 +92,7 @@ class spinconv(BaseModel):
         self.cutoff = cutoff
         self.otf_graph = otf_graph
         self.show_timing_info = show_timing_info
-        self.max_num_elements = max_num_elements
+        self.max_num_elements = _element_table_size(max_num_elements)
         self.mid_hidden_channels = mid_hidden_channels
         self.sphere_size_lat = sphere_size_lat
         self.sphere_size_long = sphere_size_long

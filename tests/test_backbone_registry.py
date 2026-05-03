@@ -5,7 +5,11 @@ import torch
 from torch_geometric.data import Data
 
 from ocpmodels.models.property_model import SchNetBackbone, build_backbone
-from ocpmodels.models.spinconv import ProjectLatLongSphere, _sort_edges_by_target
+from ocpmodels.models.spinconv import (
+    ProjectLatLongSphere,
+    _element_table_size,
+    _sort_edges_by_target,
+)
 
 
 @pytest.mark.parametrize(
@@ -158,3 +162,8 @@ def test_spinconv_projection_raises_before_cuda_index_assert():
 
     with pytest.raises(ValueError, match="out of bounds"):
         projector(x, 2, index, delta, source_edge_index)
+
+
+def test_spinconv_element_table_size_supports_real_atomic_numbers():
+    assert _element_table_size(90) >= 91
+    assert _element_table_size(90) >= 119
