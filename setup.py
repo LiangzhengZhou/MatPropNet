@@ -16,6 +16,8 @@ setup(
             "matpropnet-eval=matpropnet.cli.eval:main",
             "matpropnet-predict=matpropnet.cli.predict:main",
             "matpropnet-embed-vis=matpropnet.cli.embed_vis:main",
+            "matpropnet-explain=matpropnet.cli.explain:main",
+            "matpropnet-ensemble-explain=matpropnet.cli.ensemble_explain:main",
         ]
     },
     install_requires=[

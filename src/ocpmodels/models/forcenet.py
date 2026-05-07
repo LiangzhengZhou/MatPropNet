@@ -169,7 +169,7 @@ class InteractionBlock(MessagePassing):
         if not self.ablation == "noself":
             torch.nn.init.xavier_uniform_(self.center_W)
 
-    def forward(self, x, edge_index, edge_attr, edge_weight):
+    def forward(self, x, edge_index, edge_attr, edge_weight, edge_mask=None):
         if self.basis_type != "rawcat":
             edge_emb = self.lin_basis(edge_attr)
         else:
@@ -184,6 +184,14 @@ class InteractionBlock(MessagePassing):
             )
 
         W = self.mlp_edge(emb) * edge_weight.view(-1, 1)
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=W.device).view(-1)
+            if edge_mask.numel() != edge_index.shape[1]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.numel()} entries, "
+                    f"expected {edge_index.shape[1]}."
+                )
+            W = W * edge_mask.view(-1, 1)
         if self.ablation == "nofilter":
             x = self.propagate(edge_index, x=x, W=W) + self.center_W
         else:
@@ -533,7 +541,10 @@ class ForceNet(BaseModel):
         energy = self.energy_mlp(out)
         return energy, force
 
-    def forward_features(self, data):
+    def forward_features(
+        self, data, edge_mask=None, node_mask=None, explain_mode=False
+    ):
+        del node_mask, explain_mode
         z = data.atomic_numbers.long()
         pos = data.pos
 
@@ -563,6 +574,13 @@ class ForceNet(BaseModel):
         edge_index = out["edge_index"]
         edge_dist = out["distances"]
         edge_vec = out["distance_vec"]
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=edge_index.device).view(-1)
+            if edge_mask.numel() != edge_index.shape[1]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.numel()} entries, "
+                    f"expected {edge_index.shape[1]}."
+                )
 
         if self.pbc_apply_sph_harm:
             edge_vec_normalized = edge_vec / edge_dist.view(-1, 1)
@@ -599,7 +617,9 @@ class ForceNet(BaseModel):
             edge_attr = self.basis_fun(raw_edge_attr)
 
         for interaction in self.interactions:
-            h = h + interaction(h, edge_index, edge_attr, edge_weight)
+            h = h + interaction(
+                h, edge_index, edge_attr, edge_weight, edge_mask=edge_mask
+            )
         h = self.lin(h)
         h = self.activation(h)
         return {"node_emb": h}

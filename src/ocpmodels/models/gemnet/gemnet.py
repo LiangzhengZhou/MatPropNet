@@ -337,7 +337,13 @@ class GemNetT(torch.nn.Module):
         return tensor_ordered
 
     def reorder_symmetric_edges(
-        self, edge_index, cell_offsets, neighbors, edge_dist, edge_vector
+        self,
+        edge_index,
+        cell_offsets,
+        neighbors,
+        edge_dist,
+        edge_vector,
+        edge_mask=None,
     ):
         """
         Reorder edges to make finding counter-directional edges easier.
@@ -408,6 +414,11 @@ class GemNetT(torch.nn.Module):
         edge_vector_new = self.select_symmetric_edges(
             edge_vector, mask, edge_reorder_idx, True
         )
+        edge_mask_new = None
+        if edge_mask is not None:
+            edge_mask_new = self.select_symmetric_edges(
+                edge_mask, mask, edge_reorder_idx, False
+            )
 
         return (
             edge_index_new,
@@ -415,6 +426,7 @@ class GemNetT(torch.nn.Module):
             neighbors_new,
             edge_dist_new,
             edge_vector_new,
+            edge_mask_new,
         )
 
     def select_edges(
@@ -444,7 +456,18 @@ class GemNetT(torch.nn.Module):
             )
         return edge_index, cell_offsets, neighbors, edge_dist, edge_vector
 
-    def generate_interaction_graph(self, data):
+    def _initial_edge_mask_for_data(self, data, edge_mask, edge_index):
+        if edge_mask is None:
+            return None
+        edge_mask = edge_mask.to(device=edge_index.device).view(-1)
+        if edge_mask.numel() != edge_index.shape[1]:
+            raise ValueError(
+                f"edge_mask has {edge_mask.numel()} entries, "
+                f"expected {edge_index.shape[1]}."
+            )
+        return edge_mask
+
+    def generate_interaction_graph(self, data, edge_mask=None):
         num_atoms = data.atomic_numbers.size(0)
 
         if self.use_pbc:
@@ -452,10 +475,14 @@ class GemNetT(torch.nn.Module):
                 edge_index, cell_offsets, neighbors = radius_graph_pbc(
                     data, self.cutoff, self.max_neighbors
                 )
+                edge_mask = None
             else:
                 edge_index = data.edge_index
                 cell_offsets = data.cell_offsets
                 neighbors = data.neighbors
+                edge_mask = self._initial_edge_mask_for_data(
+                    data, edge_mask, edge_index
+                )
 
             # Switch the indices, so the second one becomes the target index,
             # over which we can efficiently aggregate.
@@ -492,12 +519,15 @@ class GemNetT(torch.nn.Module):
                 edge_index.shape[1], 3, device=data.pos.device
             )
             neighbors = compute_neighbors(data, edge_index)
+            edge_mask = None
 
         # Mask interaction edges if required
         if self.otf_graph or np.isclose(self.cutoff, 6):
             select_cutoff = None
         else:
             select_cutoff = self.cutoff
+        if edge_mask is not None and select_cutoff is not None:
+            edge_mask = edge_mask[D_st <= select_cutoff]
         (edge_index, cell_offsets, neighbors, D_st, V_st,) = self.select_edges(
             data=data,
             edge_index=edge_index,
@@ -514,8 +544,9 @@ class GemNetT(torch.nn.Module):
             neighbors,
             D_st,
             V_st,
+            edge_mask,
         ) = self.reorder_symmetric_edges(
-            edge_index, cell_offsets, neighbors, D_st, V_st
+            edge_index, cell_offsets, neighbors, D_st, V_st, edge_mask=edge_mask
         )
 
         # Indices for swapping c->a and a->c (for symmetric MP)
@@ -542,6 +573,7 @@ class GemNetT(torch.nn.Module):
             id3_ba,
             id3_ca,
             id3_ragged_idx,
+            edge_mask,
         )
 
     @property
@@ -549,7 +581,7 @@ class GemNetT(torch.nn.Module):
         return self.int_blocks
 
     @conditional_grad(torch.enable_grad())
-    def _compute_interaction_states(self, data):
+    def _compute_interaction_states(self, data, edge_mask=None):
         pos = data.pos
         batch = data.batch
         atomic_numbers = data.atomic_numbers.long()
@@ -566,8 +598,15 @@ class GemNetT(torch.nn.Module):
             id3_ba,
             id3_ca,
             id3_ragged_idx,
-        ) = self.generate_interaction_graph(data)
+        ) = self.generate_interaction_graph(data, edge_mask=edge_mask)
         idx_s, idx_t = edge_index
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=D_st.device).view(-1)
+            if edge_mask.numel() != D_st.shape[0]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.numel()} entries, "
+                    f"expected {D_st.shape[0]} after GemNet graph generation."
+                )
 
         cos_cab = inner_product_normalized(V_st[id3_ca], V_st[id3_ba])
         h_atomic_data = self.atom_emb_attention(atomic_numbers)
@@ -575,15 +614,25 @@ class GemNetT(torch.nn.Module):
             D_st, cos_cab, id3_ca, h_atomic_data, idx_s, idx_t
         )
         rbf_attn = self.radial_basis_attn(D_st)
+        if edge_mask is not None:
+            rbf_attn = rbf_attn * edge_mask.view(-1, 1)
         me_block = self.me_block(rbf_attn, h_atomic_data, idx_s, idx_t)
 
         h = self.atom_emb(atomic_numbers)
         m = self.edge_emb(h, me_block, idx_s, idx_t)
+        if edge_mask is not None:
+            m = m * edge_mask.view(-1, 1)
 
         rbf3 = self.mlp_rbf3(me_block)
+        if edge_mask is not None:
+            rbf3 = rbf3 * edge_mask.view(-1, 1)
         cbf3 = self.mlp_cbf3(rad_cbf3, cbf3, id3_ca, id3_ragged_idx)
         rbf_h = self.mlp_rbf_h(me_block)
+        if edge_mask is not None:
+            rbf_h = rbf_h * edge_mask.view(-1, 1)
         rbf_out = self.mlp_rbf_out(me_block)
+        if edge_mask is not None:
+            rbf_out = rbf_out * edge_mask.view(-1, 1)
 
         states = [(h, m)]
         for i in range(self.num_blocks):
@@ -599,6 +648,7 @@ class GemNetT(torch.nn.Module):
                 rbf_h=rbf_h,
                 idx_s=idx_s,
                 idx_t=idx_t,
+                edge_mask=edge_mask,
             )
             states.append((h, m))
 
@@ -609,11 +659,13 @@ class GemNetT(torch.nn.Module):
             "batch": batch,
             "pos": pos,
             "edge_vector": V_st,
+            "edge_mask": edge_mask,
         }
 
     @conditional_grad(torch.enable_grad())
-    def forward_features(self, data):
-        features = self._compute_interaction_states(data)
+    def forward_features(self, data, edge_mask=None, node_mask=None, explain_mode=False):
+        del node_mask, explain_mode
+        features = self._compute_interaction_states(data, edge_mask=edge_mask)
         node_emb, edge_emb = features["states"][-1]
         return {
             "node_emb": node_emb,

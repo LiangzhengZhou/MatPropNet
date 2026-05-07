@@ -157,6 +157,7 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         rbf_h,
         idx_s,
         idx_t,
+        edge_mask=None,
     ):
         """
         Returns
@@ -169,6 +170,14 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
 
         # Initial transformation
         x_ca_skip = self.dense_ca(m)  # (nEdges, emb_size_edge)
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=m.device).view(-1, 1)
+            if edge_mask.shape[0] != m.shape[0]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.shape[0]} entries, "
+                    f"expected {m.shape[0]}."
+                )
+            x_ca_skip = x_ca_skip * edge_mask
 
         x3 = self.trip_interaction(
             m,
@@ -178,6 +187,7 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
             id_swap,
             id3_ba,
             id3_ca,
+            edge_mask=edge_mask,
         )
 
         ## ----------------------------- Merge Embeddings after Triplet Interaction ------------------------------ ##
@@ -192,6 +202,8 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         # Skip connection
         m = m + x  # (nEdges, emb_size_edge)
         m = m * self.inv_sqrt_2
+        if edge_mask is not None:
+            m = m * edge_mask
 
         # Transformations after skip connection
         for i, layer in enumerate(self.layers_after_skip):
@@ -206,6 +218,8 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
 
         ## ----------------------------- Update Edge Embeddings with Atom Embeddings ----------------------------- ##
         m2 = self.concat_layer(h, m, idx_s, idx_t)  # (nEdges, emb_size_edge)
+        if edge_mask is not None:
+            m2 = m2 * edge_mask
 
         for i, layer in enumerate(self.residual_m):
             m2 = layer(m2)  # (nEdges, emb_size_edge)
@@ -213,6 +227,8 @@ class InteractionBlockTripletsOnly(torch.nn.Module):
         # Skip connection
         m = m + m2  # (nEdges, emb_size_edge)
         m = m * self.inv_sqrt_2
+        if edge_mask is not None:
+            m = m * edge_mask
         return h, m
 
 
@@ -311,6 +327,7 @@ class TripletInteraction(torch.nn.Module):
         id_swap,
         id3_ba,
         id3_ca,
+        edge_mask=None,
     ):
         """
         Returns
@@ -321,16 +338,29 @@ class TripletInteraction(torch.nn.Module):
 
         # Dense transformation
         x_ba = self.dense_ba(m)  # (nEdges, emb_size_edge)
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=m.device).view(-1, 1)
+            if edge_mask.shape[0] != m.shape[0]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.shape[0]} entries, "
+                    f"expected {m.shape[0]}."
+                )
+            x_ba = x_ba * edge_mask
 
         # Transform via radial bessel basis
         rbf_emb = self.mlp_rbf(rbf3)  # (nEdges, emb_size_edge)
         x_ba2 = x_ba * rbf_emb
         x_ba = self.scale_rbf(x_ba, x_ba2)
+        if edge_mask is not None:
+            x_ba = x_ba * edge_mask
 
         x_ba = self.down_projection(x_ba)  # (nEdges, emb_size_trip)
 
         # Transform via circular spherical basis
         x_ba = x_ba[id3_ba]
+        if edge_mask is not None:
+            triplet_mask = edge_mask[id3_ba] * edge_mask[id3_ca]
+            x_ba = x_ba * triplet_mask
 
         # Efficient bilinear layer
         x = self.mlp_cbf(cbf3, x_ba, id3_ca, id3_ragged_idx)
@@ -349,4 +379,6 @@ class TripletInteraction(torch.nn.Module):
         x_ac = x_ac[id_swap]  # swap to add to edge a->c and not c->a
         x3 = x_ca + x_ac
         x3 = x3 * self.inv_sqrt_2
+        if edge_mask is not None:
+            x3 = x3 * edge_mask
         return x3

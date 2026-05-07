@@ -69,8 +69,10 @@ matpropnet-train --config /path/to/config.yml
 matpropnet-eval --config /path/to/config.yml --checkpoint /path/to/model.pt
 matpropnet-predict --config /path/to/config.yml --checkpoint /path/to/model.pt --input /path/to/test.csv --output /path/to/preds.csv
 matpropnet-embed-vis --config /path/to/config.yml --checkpoint /path/to/model.pt --lmdb /path/to/test/data.lmdb --representation z --reducer pca --out-dir /path/to/embed_vis
+matpropnet-explain --config /path/to/config.yml --checkpoint /path/to/model.pt --lmdb /path/to/test/data.lmdb --out-dir /path/to/explain_out
 matpropnet-ensemble-train --config /path/to/ensemble.yml
 matpropnet-ensemble-predict --manifest /path/to/ensemble_manifest.json --lmdb /path/to/new/data.lmdb --out-dir /path/to/ensemble_pred
+matpropnet-ensemble-explain --manifest /path/to/ensemble_manifest.json --lmdb /path/to/new/data.lmdb --out-dir /path/to/ensemble_explain
 matpropnet-ensemble-aggregate --predictions member_0.csv member_1.csv member_2.csv --out ensemble.csv
 matpropnet-benchmark --config /path/to/benchmark.yml
 ```
@@ -165,6 +167,7 @@ GemNet can now be used in two modes:
 - [Property Quickstart](docs/property_quickstart.md)
 - [Loss Configuration](docs/loss_configuration.md)
 - [Deep Ensemble Uncertainty](docs/deep_ensemble_uncertainty.md)
+- [Explainability](docs/explainability.md)
 - [Embedding Visualization](docs/embedding_visualization.md)
 - [Model Benchmark CLI](docs/benchmark.md)
 

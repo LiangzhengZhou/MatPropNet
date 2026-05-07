@@ -15,6 +15,7 @@ from torch_geometric.nn import (
     radius_graph,
 )
 from torch_geometric.nn.models.schnet import GaussianSmearing
+from torch_scatter import scatter
 
 from ocpmodels.common.registry import registry
 from ocpmodels.common.utils import get_pbc_distances, radius_graph_pbc
@@ -119,21 +120,53 @@ class CGCNNConv(MessagePassing):
         self.bn1.reset_parameters()
         self.ln1.reset_parameters()
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr, edge_mask=None):
         out = self.propagate(
             edge_index,
             x=x,
             edge_attr=edge_attr,
+            edge_mask=edge_mask,
             size=(x.size(0), x.size(0)),
         )
         return nn.Softplus()(self.ln1(out) + x)
 
-    def message(self, x_i, x_j, edge_attr):
+    def message(self, x_i, x_j, edge_attr, edge_mask=None):
         z = torch.cat([x_i, x_j, edge_attr], dim=1)
         z = self.lin1(z)
         z = self.bn1(z)
         z1, z2 = z.chunk(2, dim=1)
-        return torch.sigmoid(z1) * nn.Softplus()(z2)
+        message = torch.sigmoid(z1) * nn.Softplus()(z2)
+        if edge_mask is not None:
+            message = message * edge_mask.view(-1, 1)
+        return message
+
+
+def _validate_edge_mask(edge_mask, num_edges: int, device):
+    if edge_mask is None:
+        return None
+    edge_mask = edge_mask.to(device=device)
+    if edge_mask.numel() != num_edges:
+        raise ValueError(
+            f"edge_mask has {edge_mask.numel()} entries, expected {num_edges}."
+        )
+    return edge_mask.view(-1)
+
+
+def _edge_mask_node_gate(data, edge_mask, num_nodes: int):
+    """Approximate edge masking for complex backbones via incident node gates."""
+    if edge_mask is None or not hasattr(data, "edge_index"):
+        return None
+    edge_mask = _validate_edge_mask(
+        edge_mask, data.edge_index.shape[1], data.edge_index.device
+    )
+    src, dst = data.edge_index
+    values = torch.cat([edge_mask, edge_mask], dim=0)
+    nodes = torch.cat([src, dst], dim=0)
+    gate_sum = scatter(values, nodes, dim=0, dim_size=num_nodes, reduce="sum")
+    counts = scatter(
+        torch.ones_like(values), nodes, dim=0, dim_size=num_nodes, reduce="sum"
+    ).clamp_min(1.0)
+    return (gate_sum / counts).view(-1, 1)
 
 
 class CGCNNBackbone(nn.Module):
@@ -175,7 +208,10 @@ class CGCNNBackbone(nn.Module):
     def blocks(self):
         return self.convs
 
-    def forward(self, data):
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
         if self.embedding.device != data.atomic_numbers.device:
             self.embedding = self.embedding.to(data.atomic_numbers.device)
         data.x = self.embedding[data.atomic_numbers.long() - 1]
@@ -202,9 +238,14 @@ class CGCNNBackbone(nn.Module):
             row, col = data.edge_index
             distances = (pos[row] - pos[col]).norm(dim=-1)
         data.edge_attr = self.distance_expansion(distances)
+        edge_mask = _validate_edge_mask(
+            edge_mask, data.edge_index.shape[1], data.edge_index.device
+        )
         node_emb = self.embedding_fc(data.x)
         for conv in self.convs:
-            node_emb = conv(node_emb, data.edge_index, data.edge_attr)
+            node_emb = conv(
+                node_emb, data.edge_index, data.edge_attr, edge_mask=edge_mask
+            )
         return {"node_emb": node_emb}
 
 
@@ -243,7 +284,10 @@ class SchNetBackbone(nn.Module):
     def blocks(self):
         return self.interactions
 
-    def forward(self, data):
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
         z = data.atomic_numbers.long()
         pos = data.pos
         if self.otf_graph:
@@ -264,11 +308,18 @@ class SchNetBackbone(nn.Module):
             edge_index = out["edge_index"]
             edge_weight = out["distances"]
             edge_attr = self.distance_expansion(edge_weight)
+            edge_mask = _validate_edge_mask(
+                edge_mask, edge_index.shape[1], edge_index.device
+            )
+            if edge_mask is not None:
+                edge_weight = edge_weight * edge_mask
+                edge_attr = edge_attr * edge_mask.view(-1, 1)
         else:
             edge_index = radius_graph(pos, r=self.cutoff, batch=data.batch)
             row, col = edge_index
             edge_weight = (pos[row] - pos[col]).norm(dim=-1)
             edge_attr = self.distance_expansion(edge_weight)
+            edge_mask = None
         node_emb = self.embedding(z)
         for interaction in self.interactions:
             node_emb = node_emb + interaction(node_emb, edge_index, edge_weight, edge_attr)
@@ -296,8 +347,16 @@ class GemNetBackbone(nn.Module):
     def blocks(self):
         return self.model.int_blocks
 
-    def forward(self, data):
-        return self.model.forward_features(data)
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
+        return self.model.forward_features(
+            data,
+            edge_mask=edge_mask,
+            node_mask=node_mask,
+            explain_mode=explain_mode,
+        )
 
 
 class DimeNetPlusPlusBackbone(nn.Module):
@@ -333,8 +392,16 @@ class DimeNetPlusPlusBackbone(nn.Module):
     def blocks(self):
         return self.model.blocks
 
-    def forward(self, data):
-        return self.model.forward_features(data)
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
+        return self.model.forward_features(
+            data,
+            edge_mask=edge_mask,
+            node_mask=node_mask,
+            explain_mode=explain_mode,
+        )
 
 
 class ForceNetBackbone(nn.Module):
@@ -370,8 +437,18 @@ class ForceNetBackbone(nn.Module):
     def blocks(self):
         return self.model.blocks
 
-    def forward(self, data):
-        return self.model.forward_features(data)
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
+        try:
+            features = self.model.forward_features(data, edge_mask=edge_mask)
+        except TypeError:
+            features = self.model.forward_features(data)
+            gate = _edge_mask_node_gate(data, edge_mask, features["node_emb"].shape[0])
+            if gate is not None:
+                features["node_emb"] = features["node_emb"] * gate
+        return features
 
 
 class SpinConvBackbone(nn.Module):
@@ -416,8 +493,15 @@ class SpinConvBackbone(nn.Module):
     def blocks(self):
         return self.model.blocks
 
-    def forward(self, data):
-        return self.model.forward_features(data)
+    def forward(
+        self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
+    ):
+        del node_mask, explain_mode
+        features = self.model.forward_features(data)
+        gate = _edge_mask_node_gate(data, edge_mask, features["node_emb"].shape[0])
+        if gate is not None:
+            features["node_emb"] = features["node_emb"] * gate
+        return features
 
 
 def build_backbone(backbone_config: Dict, bond_feat_dim: int) -> nn.Module:
@@ -546,8 +630,20 @@ class PropertyModel(BaseModel):
             "heads": list(self.heads.parameters()),
         }
 
-    def forward(self, data, return_latent: bool = False):
-        features = self.backbone(data)
+    def forward(
+        self,
+        data,
+        return_latent: bool = False,
+        edge_mask: torch.Tensor | None = None,
+        node_mask: torch.Tensor | None = None,
+        explain_mode: bool = False,
+    ):
+        features = self.backbone(
+            data,
+            edge_mask=edge_mask,
+            node_mask=node_mask,
+            explain_mode=explain_mode,
+        )
         node_emb = features["node_emb"]
         graph_emb = self.pooling(node_emb, data.batch)
         z = self.latent_projector(graph_emb)

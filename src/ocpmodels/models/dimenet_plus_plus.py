@@ -132,15 +132,25 @@ class InteractionPPBlock(torch.nn.Module):
         for res_layer in self.layers_after_skip:
             res_layer.reset_parameters()
 
-    def forward(self, x, rbf, sbf, idx_kj, idx_ji):
+    def forward(self, x, rbf, sbf, idx_kj, idx_ji, edge_mask=None):
         # Initial transformations.
         x_ji = self.act(self.lin_ji(x))
         x_kj = self.act(self.lin_kj(x))
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=x.device).view(-1, 1)
+            if edge_mask.shape[0] != x.shape[0]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.shape[0]} entries, "
+                    f"expected {x.shape[0]}."
+                )
+            x_ji = x_ji * edge_mask
 
         # Transformation via Bessel basis.
         rbf = self.lin_rbf1(rbf)
         rbf = self.lin_rbf2(rbf)
         x_kj = x_kj * rbf
+        if edge_mask is not None:
+            x_kj = x_kj * edge_mask
 
         # Down-project embeddings and generate interaction triplet embeddings.
         x_kj = self.act(self.lin_down(x_kj))
@@ -149,6 +159,9 @@ class InteractionPPBlock(torch.nn.Module):
         sbf = self.lin_sbf1(sbf)
         sbf = self.lin_sbf2(sbf)
         x_kj = x_kj[idx_kj] * sbf
+        if edge_mask is not None:
+            triplet_mask = edge_mask[idx_kj] * edge_mask[idx_ji]
+            x_kj = x_kj * triplet_mask
 
         # Aggregate interactions and up-project embeddings.
         x_kj = scatter(x_kj, idx_ji, dim=0, dim_size=x.size(0))
@@ -194,8 +207,16 @@ class OutputPPBlock(torch.nn.Module):
             lin.bias.data.fill_(0)
         self.lin.weight.data.fill_(0)
 
-    def forward(self, x, rbf, i, num_nodes=None):
+    def forward(self, x, rbf, i, num_nodes=None, edge_mask=None):
         x = self.lin_rbf(rbf) * x
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=x.device).view(-1, 1)
+            if edge_mask.shape[0] != x.shape[0]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.shape[0]} entries, "
+                    f"expected {x.shape[0]}."
+                )
+            x = x * edge_mask
         x = scatter(x, i, dim=0, dim_size=num_nodes)
         x = self.lin_up(x)
         for lin in self.lins:
@@ -476,7 +497,8 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus):
         else:
             return energy
 
-    def forward_features(self, data):
+    def forward_features(self, data, edge_mask=None, node_mask=None, explain_mode=False):
+        del node_mask, explain_mode
         pos = data.pos
         batch = data.batch
 
@@ -506,6 +528,13 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus):
             _, i = edge_index
             dist = (pos[i] - pos[edge_index[0]]).pow(2).sum(dim=-1).sqrt()
             offsets = None
+        if edge_mask is not None:
+            edge_mask = edge_mask.to(device=edge_index.device).view(-1)
+            if edge_mask.numel() != edge_index.shape[1]:
+                raise ValueError(
+                    f"edge_mask has {edge_mask.numel()} entries, "
+                    f"expected {edge_index.shape[1]}."
+                )
 
         _, _, idx_i, idx_j, idx_k, idx_kj, idx_ji = self.triplets(
             edge_index,
@@ -526,14 +555,22 @@ class DimeNetPlusPlusWrap(DimeNetPlusPlus):
         angle = torch.atan2(b, a)
 
         rbf = self.rbf(dist)
+        if edge_mask is not None:
+            rbf = rbf * edge_mask.view(-1, 1)
         sbf = self.sbf(dist, angle, idx_kj)
         x = self.emb(data.atomic_numbers.long(), rbf, i, edge_index[0])
-        node_emb = self.output_blocks[0](x, rbf, i, num_nodes=pos.size(0))
+        if edge_mask is not None:
+            x = x * edge_mask.view(-1, 1)
+        node_emb = self.output_blocks[0](
+            x, rbf, i, num_nodes=pos.size(0), edge_mask=edge_mask
+        )
         for interaction_block, output_block in zip(
             self.interaction_blocks, self.output_blocks[1:]
         ):
-            x = interaction_block(x, rbf, sbf, idx_kj, idx_ji)
-            node_emb = node_emb + output_block(x, rbf, i, num_nodes=pos.size(0))
+            x = interaction_block(x, rbf, sbf, idx_kj, idx_ji, edge_mask=edge_mask)
+            node_emb = node_emb + output_block(
+                x, rbf, i, num_nodes=pos.size(0), edge_mask=edge_mask
+            )
         return {"node_emb": node_emb}
 
     @property
