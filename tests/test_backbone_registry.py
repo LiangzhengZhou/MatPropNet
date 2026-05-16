@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn as nn
 from torch_geometric.data import Data
 
-from ocpmodels.models.property_model import SchNetBackbone, build_backbone
+from ocpmodels.models.property_model import (
+    DimeNetPlusPlusBackbone,
+    GemNetBackbone,
+    SchNetBackbone,
+    build_backbone,
+)
 from ocpmodels.models.spinconv import (
     ProjectLatLongSphere,
     _element_table_size,
@@ -101,6 +107,37 @@ def test_gemnet_backbone_accepts_preprocessed_cutoff_above_default():
 
     assert backbone.model.cutoff == 8.0
     assert backbone.model.max_neighbors == 80
+
+
+@pytest.mark.parametrize("backbone_cls", [GemNetBackbone, DimeNetPlusPlusBackbone])
+def test_mask_aware_backbone_wrappers_forward_masks(backbone_cls):
+    class Recorder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.kwargs = None
+
+        def forward_features(self, data, **kwargs):
+            self.kwargs = kwargs
+            return {"node_emb": torch.ones(1, 4)}
+
+    backbone = backbone_cls.__new__(backbone_cls)
+    nn.Module.__init__(backbone)
+    backbone.model = Recorder()
+    data = Data()
+    edge_mask = torch.tensor([1.0])
+    node_mask = torch.tensor([[1.0]])
+
+    out = backbone(
+        data,
+        edge_mask=edge_mask,
+        node_mask=node_mask,
+        explain_mode=True,
+    )
+
+    assert out["node_emb"].shape == (1, 4)
+    assert backbone.model.kwargs["edge_mask"] is edge_mask
+    assert backbone.model.kwargs["node_mask"] is node_mask
+    assert backbone.model.kwargs["explain_mode"] is True
 
 
 def test_original_dimenet_points_users_to_dimenetplusplus():

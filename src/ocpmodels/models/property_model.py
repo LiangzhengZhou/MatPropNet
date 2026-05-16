@@ -350,7 +350,6 @@ class GemNetBackbone(nn.Module):
     def forward(
         self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
     ):
-        del node_mask, explain_mode
         return self.model.forward_features(
             data,
             edge_mask=edge_mask,
@@ -395,7 +394,6 @@ class DimeNetPlusPlusBackbone(nn.Module):
     def forward(
         self, data, edge_mask=None, node_mask=None, explain_mode: bool = False
     ):
-        del node_mask, explain_mode
         return self.model.forward_features(
             data,
             edge_mask=edge_mask,
