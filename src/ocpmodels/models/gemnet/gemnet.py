@@ -598,6 +598,7 @@ class GemNetT(torch.nn.Module):
             id3_ba,
             id3_ca,
             id3_ragged_idx,
+            edge_mask,
         ) = self.generate_interaction_graph(data, edge_mask=edge_mask)
         idx_s, idx_t = edge_index
         if edge_mask is not None:

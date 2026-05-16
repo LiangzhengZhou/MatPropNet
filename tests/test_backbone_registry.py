@@ -11,6 +11,7 @@ from ocpmodels.models.property_model import (
     SchNetBackbone,
     build_backbone,
 )
+from ocpmodels.models.gemnet.gemnet import GemNetT
 from ocpmodels.models.spinconv import (
     ProjectLatLongSphere,
     _element_table_size,
@@ -138,6 +139,56 @@ def test_mask_aware_backbone_wrappers_forward_masks(backbone_cls):
     assert backbone.model.kwargs["edge_mask"] is edge_mask
     assert backbone.model.kwargs["node_mask"] is node_mask
     assert backbone.model.kwargs["explain_mode"] is True
+
+
+def test_gemnet_interaction_states_accept_returned_edge_mask():
+    model = GemNetT.__new__(GemNetT)
+    model.regress_forces = False
+    model.direct_forces = False
+    model.num_blocks = 0
+    model.int_blocks = []
+
+    edge_mask = torch.tensor([1.0, 0.5])
+
+    def generate_interaction_graph(data, edge_mask=None):
+        return (
+            torch.tensor([[0, 1], [1, 0]], dtype=torch.long),
+            torch.tensor([2]),
+            torch.tensor([1.0, 1.0]),
+            torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]]),
+            torch.tensor([1, 0]),
+            torch.tensor([0, 1]),
+            torch.tensor([1, 0]),
+            torch.tensor([0, 0]),
+            edge_mask,
+        )
+
+    model.generate_interaction_graph = generate_interaction_graph
+    model.atom_emb_attention = lambda atomic_numbers: torch.ones(
+        atomic_numbers.numel(), 4
+    )
+    model.cbf_basis3 = lambda *args: (torch.ones(2, 3), torch.ones(2, 3))
+    model.radial_basis_attn = lambda distances: torch.ones(distances.numel(), 4)
+    model.me_block = lambda rbf_attn, h_atomic_data, idx_s, idx_t: rbf_attn
+    model.atom_emb = lambda atomic_numbers: torch.ones(atomic_numbers.numel(), 4)
+    model.edge_emb = lambda h, me_block, idx_s, idx_t: torch.ones(idx_s.numel(), 4)
+    model.mlp_rbf3 = lambda me_block: torch.ones(me_block.shape[0], 3)
+    model.mlp_cbf3 = lambda rad_cbf3, cbf3, id3_ca, id3_ragged_idx: torch.ones(
+        2, 3
+    )
+    model.mlp_rbf_h = lambda me_block: torch.ones(me_block.shape[0], 4)
+    model.mlp_rbf_out = lambda me_block: torch.ones(me_block.shape[0], 4)
+
+    data = Data(
+        pos=torch.zeros(2, 3),
+        batch=torch.zeros(2, dtype=torch.long),
+        atomic_numbers=torch.tensor([6, 8], dtype=torch.long),
+    )
+
+    features = model._compute_interaction_states(data, edge_mask=edge_mask)
+
+    assert torch.equal(features["edge_mask"], edge_mask)
+    assert features["states"][-1][0].shape == (2, 4)
 
 
 def test_original_dimenet_points_users_to_dimenetplusplus():
