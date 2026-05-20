@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler, SequentialSampler
 from tqdm import tqdm
 
@@ -524,6 +525,57 @@ class PropertyTrainer(BaseTrainer):
         std = self.normalizers["target"].std[idx].to(sigma.device)
         return sigma * std
 
+    def _task_output_activation(self, task_name):
+        spec = self.task_specs.get(task_name, {})
+        output_cfg = spec.get("output", {})
+        activation = spec.get("output_activation", output_cfg.get("activation"))
+        if activation is None:
+            return "linear"
+        return str(activation).lower()
+
+    def _apply_task_output_activation(self, task_name, prediction):
+        activation = self._task_output_activation(task_name)
+        if activation in {"linear", "identity", "none"}:
+            return prediction
+        if self.task_specs[task_name].get("type", "regression") != "regression":
+            return prediction
+        if activation != "softplus":
+            raise ValueError(
+                f"Unsupported output_activation={activation!r} for task {task_name!r}. "
+                "Supported values are linear and softplus."
+            )
+
+        # If targets are normalized, constrain the physical-scale prediction and
+        # map it back to normalized space so loss/metrics/checkpoints stay compatible.
+        if "target" not in self.normalizers:
+            return F.softplus(prediction)
+        idx = self.task_name_to_idx[task_name]
+        mean = self.normalizers["target"].mean[idx].to(prediction.device)
+        std = self.normalizers["target"].std[idx].to(prediction.device)
+        prediction_physical = F.softplus(prediction * std + mean)
+        return (prediction_physical - mean) / std
+
+    def _apply_output_activations(self, out):
+        task_preds = out.get("task_preds")
+        if not task_preds:
+            return out
+        activated = OrderedDict()
+        for task_name, prediction in task_preds.items():
+            if (
+                self._task_output_activation(task_name) not in {"linear", "identity", "none"}
+                and task_name in out.get("task_log_vars", {})
+            ):
+                raise ValueError(
+                    f"Task {task_name!r} uses output_activation with Gaussian NLL output. "
+                    "Softplus-constrained Gaussian means are not enabled because the "
+                    "uncertainty head would no longer match the transformed prediction scale."
+                )
+            activated[task_name] = self._apply_task_output_activation(task_name, prediction)
+        out["task_preds"] = activated
+        if len(activated) == 1:
+            out["pred"] = next(iter(activated.values()))
+        return out
+
     def _clamp_task_log_var(self, task_name, log_var):
         loss_cfg = self.task_specs[task_name].get("loss", {})
         if not isinstance(loss_cfg, dict):
@@ -533,14 +585,14 @@ class PropertyTrainer(BaseTrainer):
         return torch.clamp(log_var, min=min_log_var, max=max_log_var)
 
     def _forward(self, batch_list):
-        return self.model(batch_list)
+        return self._apply_output_activations(self.model(batch_list))
 
     def _forward_with_optional_latent(self, batch_list, return_latent=False):
         if not return_latent:
             return self._forward(batch_list)
         model = self._unwrap_model()
         batch = self._split_batch(batch_list).to(self.device)
-        return model(batch, return_latent=True)
+        return self._apply_output_activations(model(batch, return_latent=True))
 
     def _unwrap_model(self):
         model = self.model

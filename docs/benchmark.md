@@ -69,6 +69,23 @@ For a fair comparison, keep the dataset, task, loss, batch-size policy, and
 early-stopping metric aligned across those files, and only change the backbone
 and model-size-specific optimizer settings.
 
+For a non-negative target benchmark, add the same output constraint to every
+single-model config:
+
+```yaml
+task:
+  tasks:
+    H:
+      type: regression
+      loss: mae
+      weight: 1.0
+      output_activation: softplus
+```
+
+Softplus is applied on the physical target scale when target normalization is
+configured, so benchmark metrics and exported CSV predictions remain in the
+usual target units.
+
 ## Outputs
 
 The benchmark output directory contains:

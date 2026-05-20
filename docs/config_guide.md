@@ -93,6 +93,25 @@ task:
       weight: 1.0
 ```
 
+For non-negative physical properties such as hardness, a regression task can
+constrain the exported prediction with a softplus output activation:
+
+```yaml
+task:
+  tasks:
+    H:
+      type: regression
+      loss: mae
+      weight: 1.0
+      output_activation: softplus
+```
+
+When target normalization is enabled, MatPropNet applies softplus in the
+physical target space and maps the value back to normalized space for the loss.
+This keeps old normalization, checkpoint, metric, and prediction-export behavior
+compatible while preventing negative physical predictions. The default remains
+linear if `output_activation` is omitted.
+
 Mixed multi-task:
 
 ```yaml
